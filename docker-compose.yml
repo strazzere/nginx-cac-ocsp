@@ -1,0 +1,21 @@
+services:
+  ocsp.penryn.local:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocsp
+    image: ocsp
+    networks:
+      - penryn.local
+
+  cac.penryn.local:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx-cac
+    image: nginx-cac
+    networks:
+      - penryn.local
+    ports:
+      - "8443:443"
+
+networks:
+  penryn.local:

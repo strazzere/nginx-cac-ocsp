@@ -1,0 +1,50 @@
+[ ca ]
+default_ca = CA_default  # The default CA section
+
+[ CA_default ]
+dir             = ../ca      # Directory where everything is kept
+certs           = $dir/certs    # Where the issued certs are kept
+crl_dir         = $dir/crl      # Where the issued crl are kept
+new_certs_dir   = $dir/newcerts # default place for new certs
+database        = $dir/index.txt# database index file.
+serial          = $dir/serial   # The current serial number
+RANDFILE        = $dir/private/.rand # Private random number file
+
+private_key     = $dir/private/ca.key  # The private key
+certificate     = $dir/certs/ca.crt    # The CA certificate
+
+# For certificate revocation lists
+crlnumber       = $dir/crlnumber       # the current crl number
+crl             = $dir/crl.pem         # The current CRL
+crl_extensions  = crl_ext              # The CRL extension to use
+default_crl_days= 30                   # how long before next CRL
+
+default_days    = 365                  # how long to certify for
+default_md      = sha256               # use SHA-256 by default
+preserve        = no                   # keep passed DN ordering
+
+policy          = policy_anything
+
+[ policy_anything ]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ req ]
+distinguished_name  = req_distinguished_name
+req_extensions      = req_ext
+
+[ req_distinguished_name ]
+countryName         = US
+countryName_default = US
+
+[ req_ext ]
+subjectAltName = @alt_names
+authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local,caIssuers;URI:http://penryn.local/ca.crt
+
+[ alt_names ]
+DNS.1 = penryn.local

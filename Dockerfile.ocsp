@@ -1,0 +1,7 @@
+FROM alpine:latest
+
+RUN apk update && apk add openssl python3 py3-cryptography && mkdir -p /etc/ocsp
+
+COPY ca/index.txt ocsp/proxy.py ocsp/ocsp.sh ocsp/ocsp_cert.pem ocsp/ocsp_key.pem ca/certs/ca.crt /etc/ocsp/
+
+ENTRYPOINT [ "/etc/ocsp/ocsp.sh" ]

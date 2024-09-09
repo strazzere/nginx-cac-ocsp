@@ -1,0 +1,13 @@
+FROM alpine:latest
+
+RUN apk update && apk add nginx && mkdir -p /run/nginx /www/data
+
+COPY nginx/certificate.pem nginx/key.pem ca/certs/ca.crt /etc/nginx/
+
+COPY nginx/default.conf       /etc/nginx/http.d/default.conf
+COPY nginx/index.html         /www/data/index.html
+COPY nginx/error_no_cac.html  /www/errors/error_no_cac.html
+
+EXPOSE 443/tcp
+
+ENTRYPOINT ["/usr/sbin/nginx", "-g", "daemon off;"]
