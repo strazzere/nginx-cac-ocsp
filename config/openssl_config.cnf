@@ -44,7 +44,7 @@ countryName_default = US
 
 [ req_ext ]
 subjectAltName = @alt_names
-authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local,caIssuers;URI:http://penryn.local/ca.crt
+authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local,caIssuers;URI:http://cac.penryn.local/ca.crt
 
 [ alt_names ]
 DNS.1 = penryn.local
