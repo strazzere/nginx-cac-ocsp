@@ -4,6 +4,20 @@ import tempfile
 import os
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+import requests
+
+# Utility to ensure the passed ca.crt is available at a reachable destination
+# otherwise the oscp responder will fail and hold indefinitely
+def check_file_availability(url):
+    try:
+        response = requests.head(url, timeout=1)  # Use HEAD request
+        if response.status_code == 200:
+            return True
+        else:
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred: {e}")
+        return False
 
 class OCSPValidationHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -46,7 +60,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             # Use the parsed URLs if available
             if ocsp_urls:
                 ocsp_url = ocsp_urls[0]  # Use the first OCSP URL found
-            if ca_issuer_urls:
+            if ca_issuer_urls and check_file_availability(ca_issuer_urls[0]):
                 issuer_cert_path = ca_issuer_urls[0]  # Use the first CA Issuer URL found (assuming local path or downloading)
         except:
             # Just use the default, but more than likely we should fail
@@ -59,6 +73,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
 
         try:
             # Perform the OCSP check using OpenSSL
+            print('ocsp check using issuer {0}'.format(issuer_cert_path))
             ocsp_response = subprocess.run(
                 [
                     'openssl', 'ocsp',
@@ -71,7 +86,8 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
                     '-header', 'Host={0}'.format(ocsp_url)
                 ],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=3
             )
         except Exception as e:
             self.send_response(500)
