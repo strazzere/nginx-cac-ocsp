@@ -1,6 +1,7 @@
 *.pem
 *.crt
 *.csr
+*.srl
 *.key
 ca/index.txt*
 ca/serial*
