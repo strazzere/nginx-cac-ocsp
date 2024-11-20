@@ -44,7 +44,11 @@ countryName_default = US
 
 [ req_ext ]
 subjectAltName = @alt_names
-authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local,caIssuers;URI:http://cac.penryn.local/ca.crt
+authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local:2560,caIssuers;URI:http://cac.penryn.local/ca.crt
 
 [ alt_names ]
-DNS.1 = penryn.local
+DNS.1 = cac.penryn.local
+
+[ ocsp_ext ]
+keyUsage = digitalSignature
+extendedKeyUsage = OCSPSigning

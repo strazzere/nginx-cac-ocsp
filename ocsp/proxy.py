@@ -5,6 +5,7 @@ import os
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 import requests
+from urllib.parse import urlparse, urlunparse
 
 # Utility to ensure the passed ca.crt is available at a reachable destination
 # otherwise the oscp responder will fail and hold indefinitely
@@ -18,6 +19,14 @@ def check_file_availability(url):
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")
         return False
+
+def fetch_file(url):
+    try:
+        response = requests.get(url, timeout=2)
+        response.raise_for_status()  # Raise an error for HTTP codes 4xx/5xx
+        return response.text
+    except requests.RequestException as e:
+        raise
 
 class OCSPValidationHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -36,6 +45,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
 
         # Default OCSP and CA Issuer URLs
         ocsp_url = 'http://ocsp.penryn.local:2560'
+        default_issuer_cert_path = '/etc/ocsp/ca.crt'
         issuer_cert_path = '/etc/ocsp/ca.crt'
 
         ocsp_urls = []
@@ -58,10 +68,22 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             print('****')
 
             # Use the parsed URLs if available
+
+            # Use the first OCSP URL found
             if ocsp_urls:
-                ocsp_url = ocsp_urls[0]  # Use the first OCSP URL found
+                # simplistic shoving of a default port on this
+                parsed = urlparse(ocsp_urls[0])
+                if parsed.port is None:
+                    parsed = parsed._replace(netloc=f"{parsed.hostname}:2560")
+                    ocsp_url = urlunparse(parsed)
+                else:
+                    ocsp_url = ocsp_urls[0]
+
+            # Use the first CA Issuer URL found (assuming local path or downloading)
             if ca_issuer_urls and check_file_availability(ca_issuer_urls[0]):
-                issuer_cert_path = ca_issuer_urls[0]  # Use the first CA Issuer URL found (assuming local path or downloading)
+                with tempfile.NamedTemporaryFile(delete=False, mode='w') as ca_file:
+                    ca_file.write(fetch_file(ca_issuer_urls[0]))
+                    issuer_cert_path = ca_file.name
         except:
             # Just use the default, but more than likely we should fail
             pass
@@ -80,14 +102,14 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
                     '-issuer', issuer_cert_path,
                     '-cert', cert_file_path,
                     '-url', ocsp_url,
-                    '-CAfile', issuer_cert_path,
+                    '-CAfile', default_issuer_cert_path,
                     '-verify_other', issuer_cert_path,
                     '-trust_other',
                     '-header', 'Host={0}'.format(ocsp_url)
                 ],
                 capture_output=True,
                 text=True,
-                timeout=3
+                timeout=10
             )
         except Exception as e:
             self.send_response(500)
@@ -99,7 +121,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
         cert_check_string = f"{cert_file.name}: good"
 
         # Check the response on the stderr, for some reason it's pushed there
-        if "Response verify OK" in ocsp_response.stderr and cert_check_string in ocsp_response.stderr:
+        if "Response verify OK" in ocsp_response.stderr and cert_check_string in ocsp_response.stdout:
             self.send_response(200)
         else:
             self.send_response(403)
