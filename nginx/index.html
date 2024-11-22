@@ -13,6 +13,7 @@
     <!--# if expr="$ssl_client_s_dn" -->
     <p>
     <h2>CAC certificate information:</h2>
+    <b>Client CN:</b> <!--# echo var="ssl_client_cn" --></br>
     <b>Subject DN:</b> <!--# echo var="ssl_client_s_dn" --></br>
     <b>Issuer DN:</b> <!--# echo var="ssl_client_i_dn" --></br>
     <b>Client Fingerprint:</b> <!--# echo var="ssl_client_fingerprint" --></br>
