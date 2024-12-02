@@ -36,5 +36,5 @@ sign_csr:
 revoke_csr:
 	openssl ca -revoke yubico_client.pem -config ../config/openssl_config.cnf
 
-clean:
+clean: revoke_csr
 	@rm -f yubico_client.key yubico_client.csr yubico_client.crt yubico_client.pem

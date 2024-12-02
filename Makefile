@@ -1,4 +1,5 @@
-DIRS := ca ocsp client nginx
+CLEAN_DIRS := ocsp client nginx
+DIRS := ca $(CLEAN_DIRS)
 
 .PHONY: all clean $(DIRS) run
 
