@@ -3,6 +3,34 @@ Creating certificates and placing them onto `yubikeys`. Since we cannot request 
 
 The `makefile` in this directory will create and sign a key using the CA, however the importing in to a `yubikey` is not automated, this will need to be run manually.
 
+### Provision a piv (cac) card onto a yubikey after running make
+
+Reset the current `yubikey` - this is a destructive step, only do this with `yubikeys` you're using for testing this process with.
+```sh
+$ ykman piv reset
+WARNING! This will delete all stored PIV data and restore factory settings. Proceed? [y/N]: Y
+Resetting PIV data...
+Reset complete. All PIV data has been cleared from the YubiKey.
+Your YubiKey now has the default PIN, PUK and Management Key:
+	PIN:	123456
+	PUK:	12345678
+	Management Key:	010203040506070801020304050607080102030405060708
+```
+
+Import the private key.
+```sh
+$ ykman piv keys import 9a yubico_client.key
+Private key imported into slot AUTHENTICATION.
+```
+
+Import the signed by the CA CSR into the `yubikey`:
+```sh
+$ ykman piv certificates import 9a yubico_client.pem -v
+Enter a management key [blank to use default key]:
+Enter PIN:
+Certificate imported into slot AUTHENTICATION
+```
+
 ### Provisioning a piv (cac) card onto a yubikey
 
 Reset the current `yubikey` - this is a destructive step, only do this with `yubikeys` you're using for testing this process with.
