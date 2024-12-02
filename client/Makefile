@@ -10,7 +10,7 @@ EMAIL = john.doe.civ@fake.mil
 
 SUBJ = /C=$(COUNTRY)/O=$(ORG)/OU=$(OU1)/OU=$(OU2)/CN=$(CN)
 
-all: yubico_client.key yubico_client.crt yubico_client.pem sign_csr
+all: yubico_client.key yubico_client.crt yubico_client.pem
 
 yubico_client.key:
 	openssl req -new -newkey rsa:2048 -nodes -keyout yubico_client.key -out yubico_client.csr \
@@ -27,8 +27,7 @@ yubico_client.pem:
 	openssl x509 -req -days 365 -in yubico_client.csr -signkey yubico_client.key -out yubico_client.pem \
 		-extfile san_extfile.cnf
 	@rm -f san_extfile.cnf
-
-sign_csr:
+	# sign_csr:
 	openssl ca -in yubico_client.csr -out yubico_client.pem \
 		-cert ../ca/certs/ca.crt -keyfile ../ca/private/ca.key -days 1024 \
 		-config ../config/openssl_config.cnf -extensions req_ext -batch
