@@ -12,10 +12,14 @@ all: ca
 
 ca: deps ca.crt
 
-deps:
-	mkdir -p certs newcerts private
+index.txt:
 	touch index.txt
+
+serial:
 	echo 01 > serial
+
+deps: index.txt serial
+	mkdir -p certs newcerts private
 
 ca.crt: ca.key
 	openssl req -x509 -new -nodes -key private/ca.key \
