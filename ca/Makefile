@@ -1,4 +1,4 @@
-.PHONY: all run ca deps clean
+.PHONY: all clean
 
 COUNTRY = US
 ORG = Not U.S. Government
@@ -10,7 +10,7 @@ SUBJ = /C=$(COUNTRY)/O=$(ORG)/CN=$(CN)/OU=$(OU1)/OU=$(OU2)
 
 all: ca
 
-ca: deps ca.crt
+ca: deps certs/ca.crt
 
 index.txt:
 	touch index.txt
@@ -21,7 +21,7 @@ serial:
 deps: index.txt serial
 	mkdir -p certs newcerts private
 
-ca.crt: ca.key
+ca.crt: private/ca.key
 	openssl req -x509 -new -nodes -key private/ca.key \
 		-sha256 -days 365 -out certs/ca.crt -batch \
 		-subj "$(SUBJ)"
