@@ -24,7 +24,7 @@ def fetch_file(url):
     try:
         response = requests.get(url, timeout=2)
         response.raise_for_status()  # Raise an error for HTTP codes 4xx/5xx
-        return response.text
+        return response.content
     except requests.RequestException as e:
         raise
 
@@ -81,7 +81,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
 
             # Use the first CA Issuer URL found (assuming local path or downloading)
             if ca_issuer_urls and check_file_availability(ca_issuer_urls[0]):
-                with tempfile.NamedTemporaryFile(delete=False, mode='w') as ca_file:
+                with tempfile.NamedTemporaryFile(delete=False, mode='wb') as ca_file:
                     ca_file.write(fetch_file(ca_issuer_urls[0]))
                     issuer_cert_path = ca_file.name
         except:
@@ -89,7 +89,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             pass
 
         # Create a temporary file to store the client certificate
-        with tempfile.NamedTemporaryFile(delete=False, mode='w') as cert_file:
+        with tempfile.NamedTemporaryFile(delete=False, mode='wb') as cert_file:
             cert_file.write(cleaned_cert_pem)
             cert_file_path = cert_file.name  # Get the file path
 
