@@ -83,6 +83,13 @@ yubico_client.pem: good
 	This Update: Sep  6 18:54:00 2024 GMT
 ```
 
+### Testing via curl
+
+After running the docker container, you can utilize `curl` directly with the certificates instead of provisioning the yubikey.
+```sh
+$ curl -vv -k --cert yubico_client.pem --key yubico_client.key https://0.0.0.0:8443/
+```
+
 ### Revoking a certificate
 ```sh
 $ openssl ca -revoke yubico_client.pem -config ../config/openssl_config.cnf
