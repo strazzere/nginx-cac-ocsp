@@ -14,7 +14,7 @@ run:
 	docker compose up --build
 
 clean:
-	@for dir in $(DIRS); do \
+	@for dir in $(CLEAN_DIRS); do \
 		echo "Entering directory '$$dir' for clean"; \
 		$(MAKE) -C $$dir clean; \
 		echo "Leaving directory '$$dir'"; \
