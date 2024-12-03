@@ -3,7 +3,7 @@
 CN = Penryn Mock OCSP Responder
 SUBJ = /CN=$(CN)
 
-all: ocsp_req.pem
+all: ocsp_cert.pem
 
 ocsp_key.pem:
 	openssl genpkey -algorithm RSA -out ocsp_key.pem

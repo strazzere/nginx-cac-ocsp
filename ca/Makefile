@@ -21,12 +21,12 @@ serial:
 deps: index.txt serial
 	mkdir -p certs newcerts private
 
-ca.crt: private/ca.key
+certs/ca.crt: private/ca.key
 	openssl req -x509 -new -nodes -key private/ca.key \
 		-sha256 -days 365 -out certs/ca.crt -batch \
 		-subj "$(SUBJ)"
 
-ca.key:
+private/ca.key:
 	openssl genrsa -out private/ca.key 2048
 
 clean:
