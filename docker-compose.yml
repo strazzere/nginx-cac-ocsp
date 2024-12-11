@@ -8,6 +8,8 @@ services:
       - penryn.local
 
   cac.penryn.local:
+    environment:
+      DOWNSTREAM_SERVICE: "www.penryn.com"
     build:
       context: .
       dockerfile: Dockerfile.nginx-cac

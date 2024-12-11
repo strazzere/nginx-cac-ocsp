@@ -22,9 +22,10 @@ map $ssl_client_s_dn $ssl_client_cn {
 }
 
 server {
+    resolver 8.8.8.8 valid=10s ipv6=off;
 
     access_log /dev/stdout;
-    error_log /dev/stderr;
+    error_log /dev/stderr debug;
 
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
@@ -78,6 +79,27 @@ server {
         proxy_set_header X-Client-Cert $ssl_client_cert;
     }
 
+    location = /cac-test {
+        auth_request /ocsp-validate;
+
+        auth_request_set $npke_upn $upstream_http_npke_upn;
+        auth_request_set $auth_status $upstream_status;
+
+        if ($auth_status = 200) {
+            add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure";
+            # Directly serve the file for `/cac-test`
+            return 200;
+        }
+
+        error_page 403 = @error403;
+
+        root /www/data;
+        index index.html;
+
+        # Explicitly serve index.html for `/cac-test`
+        try_files /index.html =404;
+    }
+
     location / {
         auth_request /ocsp-validate;
 
@@ -91,6 +113,9 @@ server {
 
         autoindex on;
         ssi on;
+
+        proxy_set_header ssl_client_cn $ssl_client_cn;
+        proxy_pass http://${DOWNSTREAM_SERVICE};
     }
 
     location @error403 {

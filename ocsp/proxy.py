@@ -4,6 +4,9 @@ import tempfile
 import os
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.bindings._rust import (
+    ObjectIdentifier as ObjectIdentifier,
+)
 import requests
 from urllib.parse import urlparse, urlunparse
 
@@ -28,6 +31,26 @@ def fetch_file(url):
     except requests.RequestException as e:
         raise
 
+def get_upn(cert):
+    try:
+        san_extension = cert.extensions.get_extension_for_oid(x509.ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        sans = san_extension.value
+    except x509.ExtensionNotFound:
+        sans = None
+
+    # Parse the SANs and extract the UPN
+    if sans:
+        for general_name in sans:
+            if isinstance(general_name, x509.OtherName):
+                oid = general_name.type_id.dotted_string
+                # Match the OID for UPN (1.3.6.1.4.1.311.20.2.3)
+                if oid == "1.3.6.1.4.1.311.20.2.3":
+                    upn = general_name.value[2:].decode('utf-8')
+                    print("UPN:", upn)
+                    return upn
+
+    return None
+
 class OCSPValidationHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Get the client certificate from the header
@@ -48,13 +71,27 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
         default_issuer_cert_path = '/etc/ocsp/ca.crt'
         issuer_cert_path = '/etc/ocsp/ca.crt'
 
+        temp_ca = tempfile.NamedTemporaryFile(delete=False, mode='w+b')
+        temp_cert = tempfile.NamedTemporaryFile(delete=False, mode='w')
+
         ocsp_urls = []
         ca_issuer_urls = []
 
+        upn = None
+
         try:
+            # Parse UPN
+            upn = get_upn(cert)
+
+            if upn == None:
+                self.send_response(400)
+                self.end_headers()
+                temp_ca.close()
+                temp_cert.close()
+                return
+
             # Parse AIA extension
             aia = cert.extensions.get_extension_for_oid(x509.ExtensionOID.AUTHORITY_INFORMATION_ACCESS).value
-
 
             for access_description in aia:
                 if access_description.access_method == x509.AuthorityInformationAccessOID.OCSP:
@@ -74,14 +111,14 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
                 # simplistic shoving of a default port on this
                 parsed = urlparse(ocsp_urls[0])
                 if parsed.port is None:
-                    parsed = parsed._replace(netloc=f"{parsed.hostname}:2560")
+                    # parsed = parsed._replace(netloc=f"{parsed.hostname}:2560")
                     ocsp_url = urlunparse(parsed)
                 else:
                     ocsp_url = ocsp_urls[0]
 
             # Use the first CA Issuer URL found (assuming local path or downloading)
             if ca_issuer_urls and check_file_availability(ca_issuer_urls[0]):
-                with tempfile.NamedTemporaryFile(delete=False, mode='w+b') as ca_file:
+                with temp_ca as ca_file:
                     ca_file.write(fetch_file(ca_issuer_urls[0]))
                     issuer_cert_path = ca_file.name
         except:
@@ -89,7 +126,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             pass
 
         # Create a temporary file to store the client certificate
-        with tempfile.NamedTemporaryFile(delete=False, mode='w') as cert_file:
+        with temp_cert as cert_file:
             cert_file.write(cleaned_cert_pem)
             cert_file_path = cert_file.name  # Get the file path
 
@@ -116,19 +153,33 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             self.end_headers()
             print(f"Error: {str(e)}")
             os.remove(cert_file_path)
+            temp_ca.close()
+            temp_cert.close()
             return
 
         cert_check_string = f"{cert_file.name}: good"
 
+        print("ocsp_response.stderr: {0}".format("Response verify OK" in ocsp_response.stderr))
+        print(ocsp_response.stderr)
+
+        print("ocsp_response.stdout: {0}".format(cert_check_string in ocsp_response.stdout))
+        print(ocsp_response.stdout)
+
+        print("checking")
+
         # Check the response on the stderr, for some reason it's pushed there
         if "Response verify OK" in ocsp_response.stderr and cert_check_string in ocsp_response.stdout:
             self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("X-UPN", upn) 
         else:
             self.send_response(403)
 
         self.end_headers()
 
         os.remove(cert_file_path)
+        temp_ca.close()
+        temp_cert.close()
 
 def run(server_class=HTTPServer, handler_class=OCSPValidationHandler, port=9000):
     server_address = ('', port)
