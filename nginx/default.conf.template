@@ -80,6 +80,15 @@ server {
     }
 
     location = /cac-test {
+        error_page 495 =200 /error_no_cac.html;
+        error_page 403 =200 /index.html;
+        error_page 400 =200 /index.html;
+
+        # Explicitly catch the NONE case and redirect
+        if ($ssl_client_verify = NONE) {
+            return 495;
+        }
+
         auth_request /ocsp-validate;
 
         auth_request_set $npke_upn $upstream_http_npke_upn;
@@ -91,8 +100,6 @@ server {
             return 200;
         }
 
-        error_page 403 = @error403;
-
         root /www/data;
         index index.html;
 
@@ -101,6 +108,13 @@ server {
     }
 
     location / {
+        error_page 495 =200 /error_no_cac.html;
+
+        # Explicitly catch the NONE case and redirect
+        if ($ssl_client_verify = NONE) {
+            return 495;
+        }
+
         auth_request /ocsp-validate;
 
         auth_request_set $auth_status $upstream_status;
