@@ -170,11 +170,11 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
         # Check the response on the stderr, for some reason it's pushed there
         if "Response verify OK" in ocsp_response.stderr and cert_check_string in ocsp_response.stdout:
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("X-UPN", upn) 
         else:
             self.send_response(403)
 
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("X-UPN", upn)
         self.end_headers()
 
         os.remove(cert_file_path)
