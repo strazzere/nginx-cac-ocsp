@@ -5,7 +5,8 @@ COUNTRY = US
 ORG = Not U.S. Government
 OU1 = PKI
 OU2 = Not DoD
-CN = DOE.JOHN.FAKE.0123456789
+EPID = 0123456789
+CN = DOE.JOHN.FAKE.$(EPID)
 EMAIL = john.doe.civ@fake.mil
 
 SUBJ = /C=$(COUNTRY)/O=$(ORG)/OU=$(OU1)/OU=$(OU2)/CN=$(CN)
@@ -23,10 +24,9 @@ yubico_client.crt:
 		-subj "$(SUBJ)"
 
 yubico_client.pem:
-	@echo "subjectAltName=email:$(EMAIL)" > san_extfile.cnf
-	openssl x509 -req -days 365 -in yubico_client.csr -signkey yubico_client.key -out yubico_client.pem \
-		-extfile san_extfile.cnf
-	@rm -f san_extfile.cnf
+	# @echo "subjectAltName=email:$(EMAIL)" > san_extfile.cnf
+	openssl x509 -req -days 365 -in yubico_client.csr -signkey yubico_client.key -out yubico_client.pem
+	# @rm -f san_extfile.cnf
 	# sign_csr:
 	openssl ca -in yubico_client.csr -out yubico_client.pem \
 		-cert ../ca/certs/ca.crt -keyfile ../ca/private/ca.key -days 1024 \

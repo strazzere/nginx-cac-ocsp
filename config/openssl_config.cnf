@@ -47,7 +47,9 @@ subjectAltName = @alt_names
 authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local:2560,caIssuers;URI:http://cac.penryn.local/ca.crt
 
 [ alt_names ]
-DNS.1 = cac.penryn.local
+otherName.0 = 2.16.840.1.101.3.6.6;UTF8:<unsupported>
+otherName.1 = 1.3.6.1.4.1.311.20.2.3;UTF8:1234567890123456@notmil
+URI.1 = urn:uuid:D1FFD1FF-D1FF-D1FF-D1FF-D1FFD1FFD1FF
 
 [ ocsp_ext ]
 keyUsage = digitalSignature
