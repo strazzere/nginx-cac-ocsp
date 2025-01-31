@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import subprocess
 import tempfile
 import os
+from cryptography.hazmat.primitives.serialization import pkcs7, Encoding
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.bindings._rust import (
@@ -51,6 +52,30 @@ def get_upn(cert):
 
     return None
 
+def strip_newlines(data):
+    return "\n".join(line.strip() for line in data.splitlines())
+
+def is_pkcs7_der(data):
+    """Check if a data is a DER-encoded PKCS#7 file."""
+    try:
+        pkcs7.load_der_pkcs7_certificates(data)
+
+        return True
+    except ValueError:
+        return False
+
+def convert_pkcs7_der_to_pem(der_data):
+    """Convert DER-encoded PKCS#7 to PEM format."""
+    pem_certs = None
+
+    try:
+        certificates = pkcs7.load_der_pkcs7_certificates(der_data)
+        pem_certs = b"".join(cert.public_bytes(Encoding.PEM) for cert in certificates)
+    except ValueError as e:
+        print(f"Error: {e}")
+
+    return pem_certs
+
 class OCSPValidationHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Get the client certificate from the header
@@ -60,8 +85,8 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             self.send_response(403)
             self.end_headers()
             return
-        
-        cleaned_cert_pem = "\n".join(line.strip() for line in client_cert_pem.splitlines())
+
+        cleaned_cert_pem = strip_newlines(client_cert_pem)
 
         # Load the certificate
         cert = x509.load_pem_x509_certificate(cleaned_cert_pem.encode(), default_backend())
@@ -119,7 +144,10 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             # Use the first CA Issuer URL found (assuming local path or downloading)
             if ca_issuer_urls and check_file_availability(ca_issuer_urls[0]):
                 with temp_ca as ca_file:
-                    ca_file.write(fetch_file(ca_issuer_urls[0]))
+                    ca_data = fetch_file(ca_issuer_urls[0])
+                    if (is_pkcs7_der(ca_data)):
+                        ca_data = convert_pkcs7_der_to_pem(ca_data)
+                    ca_file.write(ca_data)
                     issuer_cert_path = ca_file.name
         except:
             # Just use the default, but more than likely we should fail
