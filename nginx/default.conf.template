@@ -80,9 +80,8 @@ server {
     }
 
     location = /cac-test {
-        error_page 495 =200 /error_no_cac.html;
-        error_page 403 =200 /index.html;
-        error_page 400 =200 /index.html;
+        error_page 495 =404 /error_no_cac.html;
+        error_page 403 =403 @handle_cac_test_403;
 
         # Explicitly catch the NONE case and redirect
         if ($ssl_client_verify = NONE) {
@@ -91,7 +90,7 @@ server {
 
         auth_request /ocsp-validate;
 
-        auth_request_set $npke_upn $upstream_http_npke_upn;
+        auth_request_set $ssl_client_upn $upstream_http_x_upn;
         auth_request_set $auth_status $upstream_status;
 
         if ($auth_status = 200) {
@@ -100,6 +99,8 @@ server {
             return 200;
         }
 
+        ssi on;
+
         root /www/data;
         index index.html;
 
@@ -107,8 +108,17 @@ server {
         try_files /index.html =404;
     }
 
+    # Catch 403 errors from the ocsp-validation layer specifically for the cac-test
+    location @handle_cac_test_403 {
+        ssi on;
+        root /www/data;
+        index index.html;
+        try_files /index.html =404;
+    }
+
     location / {
-        error_page 495 =200 /error_no_cac.html;
+        error_page 495 =495 /error_no_cac.html;
+        error_page 403 =403 /error_no_cac.html;
 
         # Explicitly catch the NONE case and redirect
         if ($ssl_client_verify = NONE) {
@@ -122,8 +132,6 @@ server {
         if ($auth_status = 200) {
             add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure";
         }
-
-        error_page 403 = @error403;
 
         autoindex on;
         ssi on;

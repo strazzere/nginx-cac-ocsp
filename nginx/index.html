@@ -11,19 +11,18 @@
         to see what information the server could provide about the CAC.</p>
 
     <!--# if expr="$ssl_client_s_dn" -->
-    <!--# set var="fallback" value="Not Parsed" -->
     <p>
     <h2>CAC certificate information:</h2>
-    <b>UPN:</b> <!--# echo var="ssl_client_upn" default="$fallback" --></br>
-    <b>Subject DN:</b> <!--# echo var="ssl_client_s_dn" default="$fallback" --></br>
-    <b>Issuer DN:</b> <!--# echo var="ssl_client_i_dn" default="$fallback" --></br>
-    <b>Client Fingerprint:</b> <!--# echo var="ssl_client_fingerprint" default="$fallback" --></br>
-    <b>Client Serial:</b> <!--# echo var="ssl_client_serial" default="$fallback" --></br>
-    <b>Validity Start:</b> <!--# echo var="ssl_client_v_start" default="$fallback" --></br>
-    <b>Validity End:</b> <!--# echo var="ssl_client_v_end" default="$fallback" --></br>
-    <b>Remaining Days:</b> <!--# echo var="ssl_client_v_remain" default="$fallback" --></br>
-    <b>Certificate Validity (OCSP):</b> <!--# echo var="ssl_client_verify" default="$fallback" --></br>
-    <b>Client full cert:</b> <!--# echo var="ssl_client_cert" default="$fallback" --></br>
+    <b>UPN:</b> <!--# echo var="ssl_client_upn" --></br>
+    <b>Subject DN:</b> <!--# echo var="ssl_client_s_dn" --></br>
+    <b>Issuer DN:</b> <!--# echo var="ssl_client_i_dn" --></br>
+    <b>Client Fingerprint:</b> <!--# echo var="ssl_client_fingerprint" --></br>
+    <b>Client Serial:</b> <!--# echo var="ssl_client_serial" --></br>
+    <b>Validity Start:</b> <!--# echo var="ssl_client_v_start" --></br>
+    <b>Validity End:</b> <!--# echo var="ssl_client_v_end" --></br>
+    <b>Remaining Days:</b> <!--# echo var="ssl_client_v_remain" --></br>
+    <b>Certificate Validity (OCSP):</b> <!--# echo var="ssl_client_verify" --></br>
+    <b>Client full cert:</b> <!--# echo var="ssl_client_cert" --></br>
     </p>
     <!--# else -->
     <p>Something was wrong reading the CAC certificate, or server-side includes were disabled.</p>

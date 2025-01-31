@@ -57,7 +57,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
         client_cert_pem = self.headers.get('X-Client-Cert')
 
         if not client_cert_pem:
-            self.send_response(400)
+            self.send_response(403)
             self.end_headers()
             return
         
@@ -84,7 +84,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             upn = get_upn(cert)
 
             if upn == None:
-                self.send_response(400)
+                self.send_response(403)
                 self.end_headers()
                 temp_ca.close()
                 temp_cert.close()
