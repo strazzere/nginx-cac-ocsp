@@ -170,7 +170,7 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
                     '-CAfile', default_issuer_cert_path,
                     '-verify_other', issuer_cert_path,
                     '-trust_other',
-                    '-header', 'Host={0}'.format(ocsp_url)
+                    '-header', 'Host={0}'.format(urlparse(ocsp_url).hostname)
                 ],
                 capture_output=True,
                 text=True,
