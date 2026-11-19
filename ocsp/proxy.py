@@ -1,239 +1,414 @@
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import subprocess
-import tempfile
+"""OCSP validation proxy.
+
+nginx's auth_request calls this service with the client certificate in the
+`X-Client-Cert` header. We check the certificate against an OCSP responder and
+answer 200 (good) or 403 (anything else). Details are reported in headers:
+
+  X-OCSP-Status  good | revoked | unknown | expired | not-yet-valid | no-cert |
+                 invalid-cert | no-upn | unknown-issuer | unreachable | error
+  X-OCSP-Reason  human readable detail (revocation reason, error message, ...)
+  X-UPN          the UPN from the certificate's SAN, when one could be parsed
+
+Configuration (environment variables):
+
+  OCSP_HOST           default responder host (default: ocsp.penryn.local)
+  CAC_HOST            host serving ca.crt (default: cac.penryn.local)
+  OCSP_CA_PATH        trusted CA bundle (default: /etc/ocsp/ca.crt)
+  OCSP_ALLOWED_HOSTS  comma separated hosts we may contact for the OCSP and
+                      CA-issuer URLs found in a certificate's AIA extension
+                      (default: OCSP_HOST,CAC_HOST). `*` allows any host.
+  OCSP_VERBOSE        1 to log extra detail for every request
+"""
+import datetime
 import os
-from cryptography.hazmat.primitives.serialization import pkcs7, Encoding
-from cryptography import x509
+import sys
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urlparse
+
 import requests
-from urllib.parse import urlparse, urlunparse
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
+from cryptography.hazmat.primitives.serialization import Encoding, pkcs7
+from cryptography.x509 import ocsp
+from cryptography.x509.oid import ExtendedKeyUsageOID
 
-# Utility to ensure the passed ca.crt is available at a reachable destination
-# otherwise the oscp responder will fail and hold indefinitely
-def check_file_availability(url):
-    try:
-        response = requests.head(url, timeout=1)  # Use HEAD request
-        if response.status_code == 200:
-            return True
-        else:
-            return False
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
-        return False
+UPN_OID = "1.3.6.1.4.1.311.20.2.3"
+MAX_FETCH_BYTES = 1024 * 1024
+CLOCK_SKEW = datetime.timedelta(minutes=5)
+MAX_CHAIN_DEPTH = 4
 
-def fetch_file(url):
-    try:
-        response = requests.get(url, timeout=2)
-        response.raise_for_status()  # Raise an error for HTTP codes 4xx/5xx
-        return response.content
-    except requests.RequestException as e:
-        raise
+OCSP_HOST = os.environ.get("OCSP_HOST", "ocsp.penryn.local")
+CAC_HOST = os.environ.get("CAC_HOST", "cac.penryn.local")
+DEFAULT_OCSP_URL = f"http://{OCSP_HOST}:2560"
+TRUSTED_CA_PATH = os.environ.get("OCSP_CA_PATH", "/etc/ocsp/ca.crt")
+ALLOWED_HOSTS = {
+    h.strip().lower()
+    for h in (os.environ.get("OCSP_ALLOWED_HOSTS") or f"{OCSP_HOST},{CAC_HOST}").split(",")
+    if h.strip()
+}
+VERBOSE = os.environ.get("OCSP_VERBOSE", "").lower() in ("1", "true", "yes")
 
-def get_upn(cert):
-    try:
-        san_extension = cert.extensions.get_extension_for_oid(x509.ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
-        sans = san_extension.value
-    except x509.ExtensionNotFound:
-        sans = None
+TRUSTED_CAS = []
 
-    # Parse the SANs and extract the UPN
-    if sans:
-        for general_name in sans:
-            if isinstance(general_name, x509.OtherName):
-                oid = general_name.type_id.dotted_string
-                # Match the OID for UPN (1.3.6.1.4.1.311.20.2.3)
-                if oid == "1.3.6.1.4.1.311.20.2.3":
-                    upn = parse_der_utf8(general_name.value)
-                    print("UPN:", upn)
-                    return upn
 
-    return None
+def vlog(message):
+    if VERBOSE:
+        print(message, flush=True)
+
+
+class Denied(Exception):
+    """The certificate was not accepted; `status` is reported in X-OCSP-Status."""
+
+    def __init__(self, status, reason="", upn=None):
+        super().__init__(f"{status}: {reason}")
+        self.status = status
+        self.reason = reason
+        self.upn = upn
+
+
+# --- certificate helpers ----------------------------------------------------
+
+def utc(cert, attr):
+    """Timezone aware validity date, across cryptography versions."""
+    value = getattr(cert, f"{attr}_utc", None)
+    return value if value is not None else getattr(cert, attr).replace(tzinfo=datetime.timezone.utc)
+
+
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def strip_newlines(data):
+    return "\n".join(line.strip() for line in data.splitlines())
+
+
+def parse_client_cert(header):
+    """Parse the X-Client-Cert header.
+
+    nginx sends $ssl_client_escaped_cert (URL encoded, one line); the raw
+    multi-line $ssl_client_cert (with tabs added after newlines) also works.
+    """
+    value = header.strip()
+    if "\n" not in value:  # a single line means it is URL encoded
+        value = unquote(value)
+    return x509.load_pem_x509_certificate(strip_newlines(value).encode())
+
 
 def parse_der_utf8(value):
-    """Decode a DER-wrapped string (tag, length, contents), handling long-form lengths."""
+    """Decode a DER wrapped string (tag, length, contents), including long-form lengths."""
     if len(value) < 2:
         raise ValueError("DER value too short")
     length = value[1]
     offset = 2
     if length & 0x80:
-        num = length & 0x7f
-        length = int.from_bytes(value[2:2 + num], 'big')
+        num = length & 0x7F
+        length = int.from_bytes(value[2:2 + num], "big")
         offset = 2 + num
-    return value[offset:offset + length].decode('utf-8')
+    return value[offset:offset + length].decode("utf-8")
 
-def sanitize_header(value):
-    """Drop anything that could allow header injection."""
-    return "".join(c for c in value if c.isprintable() and c not in "\r\n")
 
-def strip_newlines(data):
-    return "\n".join(line.strip() for line in data.splitlines())
-
-def is_pkcs7_der(data):
-    """Check if a data is a DER-encoded PKCS#7 file."""
+def get_upn(cert):
     try:
-        pkcs7.load_der_pkcs7_certificates(data)
+        sans = cert.extensions.get_extension_for_oid(x509.ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+    except x509.ExtensionNotFound:
+        return None
+    for general_name in sans:
+        if isinstance(general_name, x509.OtherName) and general_name.type_id.dotted_string == UPN_OID:
+            return parse_der_utf8(general_name.value)
+    return None
 
-        return True
+
+def load_certificates(data):
+    """Load certificates from PEM, DER, or a PKCS#7 bundle (PEM or DER)."""
+    if b"-----BEGIN" in data:
+        try:
+            return x509.load_pem_x509_certificates(data)
+        except ValueError:
+            return pkcs7.load_pem_pkcs7_certificates(data)
+    try:
+        return [x509.load_der_x509_certificate(data)]
     except ValueError:
+        return pkcs7.load_der_pkcs7_certificates(data)
+
+
+def parse_aia(cert):
+    ocsp_urls, issuer_urls = [], []
+    try:
+        aia = cert.extensions.get_extension_for_oid(x509.ExtensionOID.AUTHORITY_INFORMATION_ACCESS).value
+    except x509.ExtensionNotFound:
+        return ocsp_urls, issuer_urls
+    for description in aia:
+        if not isinstance(description.access_location, x509.UniformResourceIdentifier):
+            continue
+        if description.access_method == x509.AuthorityInformationAccessOID.OCSP:
+            ocsp_urls.append(description.access_location.value)
+        elif description.access_method == x509.AuthorityInformationAccessOID.CA_ISSUERS:
+            issuer_urls.append(description.access_location.value)
+    return ocsp_urls, issuer_urls
+
+
+def issued_by(cert, issuer):
+    try:
+        cert.verify_directly_issued_by(issuer)
+        return True
+    except (ValueError, TypeError, InvalidSignature, UnsupportedAlgorithm):
         return False
 
-def convert_pkcs7_der_to_pem(der_data):
-    """Convert DER-encoded PKCS#7 to PEM format."""
-    pem_certs = None
+
+def is_trusted(cert, pool, depth=MAX_CHAIN_DEPTH):
+    """True if `cert` is a trusted CA, or chains to one through certs in `pool`."""
+    if cert in TRUSTED_CAS:
+        return True
+    if depth == 0:
+        return False
+    if any(issued_by(cert, ca) for ca in TRUSTED_CAS):
+        return True
+    return any(p != cert and issued_by(cert, p) and is_trusted(p, pool, depth - 1) for p in pool)
+
+
+def find_issuer(cert, pool):
+    """Find the issuer of `cert`, only ever returning a certificate that chains to a trusted CA.
+
+    Certificates downloaded from the (attacker controllable) AIA extension are
+    just candidates in `pool`; they are never trusted on their own.
+    """
+    for candidate in TRUSTED_CAS + pool:
+        if issued_by(cert, candidate) and is_trusted(candidate, pool):
+            return candidate
+    return None
+
+
+# --- network helpers --------------------------------------------------------
+
+def url_allowed(url):
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    return "*" in ALLOWED_HOSTS or parsed.hostname.lower() in ALLOWED_HOSTS
+
+
+def read_limited(response):
+    data = b""
+    for chunk in response.iter_content(65536):
+        data += chunk
+        if len(data) > MAX_FETCH_BYTES:
+            raise ValueError("response too large")
+    return data
+
+
+def fetch_issuers(url):
+    response = requests.get(url, timeout=3, allow_redirects=False, stream=True)
+    response.raise_for_status()
+    return load_certificates(read_limited(response))
+
+
+# --- OCSP -------------------------------------------------------------------
+
+def responder_matches(resp, cert):
+    if resp.responder_name is not None:
+        return cert.subject == resp.responder_name
+    if resp.responder_key_hash is not None:
+        return x509.SubjectKeyIdentifier.from_public_key(cert.public_key()).digest == resp.responder_key_hash
+    return False
+
+
+def verify_signature(resp, issuer, now):
+    """Check the OCSP response was signed by the issuer or a responder it delegated to."""
+    signer = next((c for c in list(resp.certificates) + [issuer] if responder_matches(resp, c)), None)
+    if signer is None:
+        raise Denied("error", "could not find the OCSP response signer")
+
+    if signer != issuer:
+        if not issued_by(signer, issuer):
+            raise Denied("error", "OCSP signer was not issued by the CA")
+        try:
+            ekus = signer.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        except x509.ExtensionNotFound:
+            ekus = []
+        if ExtendedKeyUsageOID.OCSP_SIGNING not in ekus:
+            raise Denied("error", "OCSP signer is not allowed to sign OCSP responses")
+        if not utc(signer, "not_valid_before") <= now <= utc(signer, "not_valid_after"):
+            raise Denied("error", "OCSP signer certificate is not currently valid")
+
+    key = signer.public_key()
+    sig, tbs, digest = resp.signature, resp.tbs_response_bytes, resp.signature_hash_algorithm
+    try:
+        if isinstance(key, rsa.RSAPublicKey):
+            key.verify(sig, tbs, padding.PKCS1v15(), digest)
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(sig, tbs, ec.ECDSA(digest))
+        elif isinstance(key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+            key.verify(sig, tbs)
+        else:
+            raise Denied("error", f"unsupported OCSP signer key type {type(key).__name__}")
+    except (InvalidSignature, UnsupportedAlgorithm, TypeError, ValueError):
+        raise Denied("error", "OCSP response signature is invalid")
+
+
+def check_ocsp(cert, issuer, url):
+    request = ocsp.OCSPRequestBuilder().add_certificate(cert, issuer, hashes.SHA1()).build()
+    try:
+        response = requests.post(
+            url,
+            data=request.public_bytes(Encoding.DER),
+            headers={
+                "Content-Type": "application/ocsp-request",
+                "Accept": "application/ocsp-response",
+                # Without the port, as some responders (e.g. ActivID) reject it
+                "Host": urlparse(url).hostname,
+            },
+            timeout=5,
+            allow_redirects=False,
+            stream=True,
+        )
+        response.raise_for_status()
+        body = read_limited(response)
+    except (requests.RequestException, ValueError) as e:
+        raise Denied("unreachable", f"OCSP responder {url} failed: {e}")
 
     try:
-        certificates = pkcs7.load_der_pkcs7_certificates(der_data)
-        pem_certs = b"".join(cert.public_bytes(Encoding.PEM) for cert in certificates)
+        resp = ocsp.load_der_ocsp_response(body)
     except ValueError as e:
-        print(f"Error: {e}")
+        raise Denied("error", f"unparseable OCSP response: {e}")
 
-    return pem_certs
+    if resp.response_status != ocsp.OCSPResponseStatus.SUCCESSFUL:
+        raise Denied("error", f"OCSP responder status {resp.response_status.name}")
+
+    now = now_utc()
+    verify_signature(resp, issuer, now)
+
+    if (resp.serial_number != request.serial_number
+            or resp.issuer_key_hash != request.issuer_key_hash
+            or resp.issuer_name_hash != request.issuer_name_hash):
+        raise Denied("error", "OCSP response is for a different certificate")
+
+    this_update = utc(resp, "this_update")
+    next_update = utc(resp, "next_update") if resp.next_update is not None else None
+    if this_update > now + CLOCK_SKEW:
+        raise Denied("error", "OCSP response is from the future")
+    if next_update is not None and next_update < now - CLOCK_SKEW:
+        raise Denied("error", "OCSP response is stale")
+
+    if resp.certificate_status == ocsp.OCSPCertStatus.GOOD:
+        return
+    if resp.certificate_status == ocsp.OCSPCertStatus.REVOKED:
+        reason = resp.revocation_reason.name if resp.revocation_reason else "unspecified"
+        raise Denied("revoked", reason)
+    raise Denied("unknown", "responder does not know this certificate")
+
+
+# --- request handling -------------------------------------------------------
+
+def validate(header):
+    """Validate the certificate in `header`. Returns the UPN, or raises Denied."""
+    if not header:
+        raise Denied("no-cert", "missing X-Client-Cert header")
+
+    try:
+        cert = parse_client_cert(header)
+    except ValueError as e:
+        raise Denied("invalid-cert", f"could not parse certificate: {e}")
+
+    try:
+        upn = get_upn(cert)
+    except (ValueError, UnicodeDecodeError) as e:
+        raise Denied("no-upn", f"could not parse UPN: {e}")
+    if upn is None:
+        raise Denied("no-upn", "certificate has no UPN in its SAN")
+
+    try:
+        return validate_known_upn(cert, upn)
+    except Denied as d:
+        d.upn = upn
+        raise
+
+
+def validate_known_upn(cert, upn):
+    now = now_utc()
+    if now > utc(cert, "not_valid_after"):
+        raise Denied("expired", f"expired on {utc(cert, 'not_valid_after').isoformat()}")
+    if now < utc(cert, "not_valid_before"):
+        raise Denied("not-yet-valid", f"valid from {utc(cert, 'not_valid_before').isoformat()}")
+
+    ocsp_urls, issuer_urls = parse_aia(cert)
+    vlog(f"AIA ocsp={ocsp_urls} ca_issuers={issuer_urls}")
+
+    # Only contact hosts we've been told are fine (the AIA is attacker controlled)
+    ocsp_url = DEFAULT_OCSP_URL
+    if ocsp_urls:
+        if url_allowed(ocsp_urls[0]):
+            ocsp_url = ocsp_urls[0]
+        else:
+            print(f"AIA OCSP url {ocsp_urls[0]} is not in OCSP_ALLOWED_HOSTS, using {DEFAULT_OCSP_URL}", flush=True)
+
+    pool = []
+    if issuer_urls:
+        if url_allowed(issuer_urls[0]):
+            try:
+                pool = fetch_issuers(issuer_urls[0])
+            except (requests.RequestException, ValueError) as e:
+                print(f"could not fetch issuer from {issuer_urls[0]}: {e}", flush=True)
+        else:
+            print(f"AIA CA issuer url {issuer_urls[0]} is not in OCSP_ALLOWED_HOSTS, ignoring", flush=True)
+
+    issuer = find_issuer(cert, pool)
+    if issuer is None:
+        raise Denied("unknown-issuer", "certificate was not issued by a trusted CA")
+
+    vlog(f"ocsp check using responder {ocsp_url} and issuer {issuer.subject.rfc4514_string()}")
+    check_ocsp(cert, issuer, ocsp_url)
+    return upn
+
+
+def header_safe(value):
+    return "".join(c for c in value if c.isascii() and c.isprintable())[:200]
+
 
 class OCSPValidationHandler(BaseHTTPRequestHandler):
+    server_version = "ocsp-proxy"
+
     def do_GET(self):
-        # Get the client certificate from the header
-        client_cert_pem = self.headers.get('X-Client-Cert')
-
-        if not client_cert_pem:
-            self.send_response(403)
-            self.end_headers()
-            return
-
-        cleaned_cert_pem = strip_newlines(client_cert_pem)
-
-        # Load the certificate
+        header = self.headers.get("X-Client-Cert")
+        upn = None
         try:
-            cert = x509.load_pem_x509_certificate(cleaned_cert_pem.encode())
-        except ValueError as e:
-            print(f"Invalid client certificate: {e}")
-            self.send_response(403)
-            self.end_headers()
-            return
-
-        ocsp_urls = []
-        ca_issuer_urls = []
-        temp_paths = []
-
-        try:
-            # Parse UPN
-            try:
-                upn = get_upn(cert)
-            except (ValueError, UnicodeDecodeError) as e:
-                print(f"Unable to parse UPN: {e}")
-                upn = None
-
-            if upn is None:
-                self.send_response(403)
-                self.end_headers()
-                return
-
-            try:
-                self.check_cert(cert, cleaned_cert_pem, upn, ocsp_urls, ca_issuer_urls, temp_paths)
-            finally:
-                for path in temp_paths:
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+            upn = validate(header)
+            code, status, reason = 200, "good", ""
+        except Denied as d:
+            code, status, reason, upn = 403, d.status, d.reason, d.upn
         except Exception as e:
-            print(f"Error: {e}")
-            self.send_response(500)
-            self.end_headers()
+            traceback.print_exc()
+            code, status, reason = 500, "error", f"internal error: {e}"
 
-    def check_cert(self, cert, cleaned_cert_pem, upn, ocsp_urls, ca_issuer_urls, temp_paths):
-        # Default OCSP and CA Issuer URLs
-        ocsp_url = 'http://ocsp.penryn.local:2560'
-        default_issuer_cert_path = '/etc/ocsp/ca.crt'
-        issuer_cert_path = default_issuer_cert_path
+        print(f"ocsp-proxy: status={status} upn={upn} reason={reason!r}", flush=True)
 
-        try:
-            # Parse AIA extension
-            aia = cert.extensions.get_extension_for_oid(x509.ExtensionOID.AUTHORITY_INFORMATION_ACCESS).value
-
-            for access_description in aia:
-                if access_description.access_method == x509.AuthorityInformationAccessOID.OCSP:
-                    ocsp_urls.append(access_description.access_location.value)
-                elif access_description.access_method == x509.AuthorityInformationAccessOID.CA_ISSUERS:
-                    ca_issuer_urls.append(access_description.access_location.value)
-
-            print('****')
-            print(ocsp_urls)
-            print(ca_issuer_urls)
-            print('****')
-
-            # Use the first OCSP URL found
-            if ocsp_urls:
-                ocsp_url = ocsp_urls[0]
-
-            # Use the first CA Issuer URL found (downloading it)
-            if ca_issuer_urls and check_file_availability(ca_issuer_urls[0]):
-                ca_data = fetch_file(ca_issuer_urls[0])
-                if is_pkcs7_der(ca_data):
-                    ca_data = convert_pkcs7_der_to_pem(ca_data)
-                with tempfile.NamedTemporaryFile(delete=False, mode='w+b') as ca_file:
-                    temp_paths.append(ca_file.name)
-                    ca_file.write(ca_data)
-                    issuer_cert_path = ca_file.name
-        except x509.ExtensionNotFound:
-            print("No AIA extension found, using default OCSP URL and issuer")
-        except Exception as e:
-            # Fall back to the defaults, but make the reason visible
-            print(f"Failed to use AIA information, falling back to defaults: {e}")
-
-        # Create a temporary file to store the client certificate
-        with tempfile.NamedTemporaryFile(delete=False, mode='w') as cert_file:
-            temp_paths.append(cert_file.name)
-            cert_file.write(cleaned_cert_pem)
-            cert_file_path = cert_file.name
-
-        try:
-            # Perform the OCSP check using OpenSSL
-            print('ocsp check using issuer {0}'.format(issuer_cert_path))
-            ocsp_response = subprocess.run(
-                [
-                    'openssl', 'ocsp',
-                    '-issuer', issuer_cert_path,
-                    '-cert', cert_file_path,
-                    '-url', ocsp_url,
-                    '-CAfile', default_issuer_cert_path,
-                    '-verify_other', issuer_cert_path,
-                    '-trust_other',
-                    '-header', 'Host={0}'.format(urlparse(ocsp_url).hostname)
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            self.send_response(500)
-            self.end_headers()
-            return
-
-        cert_check_string = f"{cert_file_path}: good"
-
-        print("ocsp_response.stderr: {0}".format("Response verify OK" in ocsp_response.stderr))
-        print(ocsp_response.stderr)
-
-        print("ocsp_response.stdout: {0}".format(cert_check_string in ocsp_response.stdout))
-        print(ocsp_response.stdout)
-
-        print("checking")
-
-        # Check the response on the stderr, for some reason it's pushed there
-        if "Response verify OK" in ocsp_response.stderr and cert_check_string in ocsp_response.stdout:
-            self.send_response(200)
-        else:
-            self.send_response(403)
-
+        self.send_response(code)
         self.send_header("Content-Type", "text/plain")
-        self.send_header("X-UPN", sanitize_header(upn))
+        self.send_header("Content-Length", "0")
+        self.send_header("X-OCSP-Status", status)
+        if reason:
+            self.send_header("X-OCSP-Reason", header_safe(reason))
+        if upn:
+            self.send_header("X-UPN", header_safe(upn))
         self.end_headers()
 
-def run(server_class=ThreadingHTTPServer, handler_class=OCSPValidationHandler, port=9000):
-    server_address = ('', port)
-    httpd = server_class(server_address, handler_class)
-    print(f'Starting OCSP validation proxy on port {port}...')
+
+def run(port=9000):
+    global TRUSTED_CAS
+    with open(TRUSTED_CA_PATH, "rb") as f:
+        TRUSTED_CAS = load_certificates(f.read())
+    print(f"Loaded {len(TRUSTED_CAS)} trusted CA(s) from {TRUSTED_CA_PATH}", flush=True)
+    print(f"Default responder: {DEFAULT_OCSP_URL}; allowed AIA hosts: {sorted(ALLOWED_HOSTS)}", flush=True)
+    httpd = ThreadingHTTPServer(("", port), OCSPValidationHandler)
+    print(f"Starting OCSP validation proxy on port {port}...", flush=True)
     httpd.serve_forever()
 
+
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception as e:
+        print(f"fatal: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)

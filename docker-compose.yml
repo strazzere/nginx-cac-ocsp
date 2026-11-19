@@ -1,31 +1,58 @@
 services:
-  ocsp.penryn.local:
+  ocsp:
     build:
       context: .
       dockerfile: Dockerfile.ocsp
     image: ocsp
+    environment:
+      OCSP_HOST: ${OCSP_HOST:-ocsp.penryn.local}
+      CAC_HOST: ${CAC_HOST:-cac.penryn.local}
+      # Hosts we may contact for AIA urls found in client certs (default: OCSP_HOST,CAC_HOST, `*` for any)
+      OCSP_ALLOWED_HOSTS: ${OCSP_ALLOWED_HOSTS:-}
+      OCSP_VERBOSE: ${OCSP_VERBOSE:-}
     healthcheck:
-      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 9000), 2)"]
+      # Send the responder a real OCSP request (the status of the answer does not matter) and check
+      # the proxy port. Never just open and close a connection to 2560: that wedges the
+      # single threaded `openssl ocsp` responder.
+      test: ["CMD-SHELL", "openssl ocsp -issuer /etc/ocsp/ca.crt -cert /etc/ocsp/ocsp_cert.pem -url http://localhost:2560 -CAfile /etc/ocsp/ca.crt -timeout 3 >/dev/null 2>&1 && python3 -c \"import socket; socket.create_connection(('localhost', 9000), 2)\""]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 5
     networks:
-      - penryn.local
+      cac:
+        aliases:
+          - ${OCSP_HOST:-ocsp.penryn.local}
 
-  cac.penryn.local:
+  cac:
     environment:
-      DOWNSTREAM_SERVICE: "www.penryn.com"
+      DOWNSTREAM_SERVICE: ${DOWNSTREAM_SERVICE:-www.penryn.com}
+      OCSP_HOST: ${OCSP_HOST:-ocsp.penryn.local}
     build:
       context: .
       dockerfile: Dockerfile.nginx-cac
     image: nginx-cac
     depends_on:
-      ocsp.penryn.local:
+      ocsp:
         condition: service_healthy
     networks:
-      - penryn.local
+      cac:
+        aliases:
+          - ${CAC_HOST:-cac.penryn.local}
     ports:
       - "8443:443"
 
+  # Test-only downstream that echoes the request headers it receives, used by `make test`:
+  #   DOWNSTREAM_SERVICE=echo:8080 docker compose --profile test up
+  echo:
+    profiles: ["test"]
+    image: ocsp
+    entrypoint: ["python3", "/echo.py"]
+    volumes:
+      - ./test/echo.py:/echo.py:ro
+    depends_on:
+      - ocsp
+    networks:
+      - cac
+
 networks:
-  penryn.local:
+  cac:

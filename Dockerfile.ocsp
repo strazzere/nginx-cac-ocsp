@@ -1,7 +1,12 @@
 FROM alpine:latest
 
-RUN apk add --no-cache openssl python3 py3-requests py3-cryptography && mkdir -p /etc/ocsp
+RUN apk add --no-cache openssl python3 py3-requests py3-cryptography \
+    && adduser -D -H -s /sbin/nologin ocsp \
+    && mkdir -p /etc/ocsp
 
-COPY ca/index.txt ocsp/proxy.py ocsp/ocsp.sh ocsp/ocsp_cert.pem ocsp/ocsp_key.pem ca/certs/ca.crt /etc/ocsp/
+COPY --chown=ocsp:ocsp ca/index.txt ocsp/proxy.py ocsp/ocsp.sh ocsp/ocsp_cert.pem ocsp/ocsp_key.pem ca/certs/ca.crt /etc/ocsp/
+
+# Neither the responder (2560) nor the proxy (9000) needs privileges
+USER ocsp
 
 ENTRYPOINT [ "/etc/ocsp/ocsp.sh" ]

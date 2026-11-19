@@ -1,0 +1,14 @@
+# Only send the files the Dockerfiles actually COPY (keeps the CA key, client keys and .git out of the build context)
+*
+!ca/index.txt
+!ca/certs/ca.crt
+!ocsp/proxy.py
+!ocsp/ocsp.sh
+!ocsp/ocsp_cert.pem
+!ocsp/ocsp_key.pem
+!nginx/certificate.pem
+!nginx/key.pem
+!nginx/default.conf.template
+!nginx/cac_headers.conf
+!nginx/index.html
+!nginx/error_no_cac.html
