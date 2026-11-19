@@ -1,9 +1,14 @@
+include config.mk
+
 CLEAN_DIRS := ocsp client nginx
 DIRS := ca $(CLEAN_DIRS)
 
-.PHONY: all clean $(DIRS) run
+.PHONY: all clean $(DIRS) run test
 
 all: $(DIRS)
+
+# Build order matters: everything else is signed by the CA
+ocsp client nginx: ca
 
 $(DIRS):
 	@echo "Entering directory '$@'"
@@ -12,6 +17,10 @@ $(DIRS):
 
 run:
 	docker compose up --build
+
+# Spin up the stack (plus a header-echoing downstream), exercise it with curl, and tear it down
+test: all
+	./test/run.sh
 
 clean:
 	@for dir in $(CLEAN_DIRS); do \

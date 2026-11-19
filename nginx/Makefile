@@ -1,16 +1,20 @@
-.PHONY: all run cert clean
+include ../config.mk
+
+.PHONY: all cert clean
 
 COUNTRY = US
 STATE = CA
 ORG = Red Naga, LLC
-CN = cac.penryn.local
+CN = $(CAC_HOST)
 
 SUBJ = /C=$(COUNTRY)/ST=$(STATE)/O=$(ORG)/CN=$(CN)
+
+all: cert
 
 cert: certificate.pem
 
 certificate.pem: key.pem
-	openssl req -batch -sha256 -days 3650             \
+	openssl req -batch -sha256 -days 3650 \
 	    -new -x509 -key key.pem -out certificate.pem \
 	    -subj "$(SUBJ)"
 
