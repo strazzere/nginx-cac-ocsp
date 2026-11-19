@@ -17,10 +17,11 @@ Configuration (environment variables):
   OCSP_ALLOWED_HOSTS  comma separated hosts we may contact for the OCSP and
                       CA-issuer URLs found in a certificate's AIA extension
                       (default: OCSP_HOST,CAC_HOST). `*` allows any host.
-  OCSP_CACHE_TTL      seconds to cache `good` and `revoked` results (default: 60,
-                      0 disables caching). Never longer than the OCSP response's
-                      nextUpdate or the certificate's own expiry. Also sent to nginx
-                      as X-Accel-Expires so nginx can cache the auth subrequest too.
+  OCSP_CACHE_TTL      seconds to cache `good` results (default: 60, 0 disables caching).
+  OCSP_CACHE_TTL_REVOKED  seconds to cache `revoked` results (default: 10 x OCSP_CACHE_TTL).
+                      Neither is ever longer than the OCSP response's nextUpdate or the
+                      certificate's own expiry. Also sent to nginx as X-Accel-Expires so
+                      nginx can cache the auth subrequest too.
   OCSP_MAX_RESPONSE_AGE  seconds an OCSP response without a nextUpdate stays acceptable
                       (default: 3600). Stops an old "good" response being replayed forever.
   OCSP_REQUIRE_NONCE  1 to reject responses that do not echo our request nonce
@@ -30,7 +31,8 @@ Configuration (environment variables):
                       is always in the logs.
   OCSP_VERBOSE        1 to log extra detail for every request
 
-Revocations take up to OCSP_CACHE_TTL seconds to be noticed.
+A newly revoked certificate is noticed within OCSP_CACHE_TTL seconds; a verdict that is
+already cached as revoked stays that way for OCSP_CACHE_TTL_REVOKED.
 """
 import contextlib
 import datetime
@@ -94,6 +96,10 @@ def _int_env(name, default):
 
 
 CACHE_TTL = _int_env("OCSP_CACHE_TTL", 60)
+# Revocation is (almost) never undone, so a revoked verdict can safely be remembered much longer
+# than a good one, which would otherwise keep a freshly revoked certificate working.
+CACHE_TTL_REVOKED = _int_env("OCSP_CACHE_TTL_REVOKED", CACHE_TTL * 10)
+CACHE_TTLS = {"good": CACHE_TTL, "revoked": CACHE_TTL_REVOKED}
 CACHE_MAX_ENTRIES = 1000
 ISSUER_CACHE_TTL = 3600
 MAX_RESPONSE_AGE = _int_env("OCSP_MAX_RESPONSE_AGE", 3600)
@@ -496,15 +502,16 @@ def validate(header):
             return Result(d.status, d.reason, upn)  # errors are never cached
 
         expires = None
-        if CACHE_TTL and status in ("good", "revoked"):
-            limit = time.time() + CACHE_TTL
+        ttl = CACHE_TTLS.get(status, 0)  # only definitive answers are cacheable
+        if ttl:
+            limit = time.time() + ttl
             for bound in (next_update, utc(cert, "not_valid_after")):
                 if bound is not None:
                     limit = min(limit, bound.timestamp())
             if limit > time.time() + 1:
                 expires = limit
                 RESULT_CACHE.put(key, (status, reason), expires)
-        return Result(status, reason, upn, "miss" if CACHE_TTL else "none", expires)
+        return Result(status, reason, upn, "miss" if ttl else "none", expires)
 
 
 def lookup(cert):
@@ -585,7 +592,8 @@ def run(port=9000):
         TRUSTED_CAS = load_certificates(f.read())
     print(f"Loaded {len(TRUSTED_CAS)} trusted CA(s) from {TRUSTED_CA_PATH}", flush=True)
     print(f"Default responder: {DEFAULT_OCSP_URL}; allowed AIA hosts: {sorted(ALLOWED_HOSTS)}", flush=True)
-    print(f"Result cache TTL: {CACHE_TTL}s" if CACHE_TTL else "Result cache disabled", flush=True)
+    print(f"Result cache TTL: good={CACHE_TTL}s revoked={CACHE_TTL_REVOKED}s" if CACHE_TTLS["good"] or CACHE_TTLS["revoked"]
+          else "Result cache disabled", flush=True)
     httpd = ThreadingHTTPServer(("", port), OCSPValidationHandler)
     print(f"Starting OCSP validation proxy on port {port}...", flush=True)
     httpd.serve_forever()
