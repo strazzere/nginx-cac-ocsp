@@ -25,6 +25,9 @@ preserve        = no                   # keep passed DN ordering
 
 policy          = policy_anything
 
+[ crl_ext ]
+authorityKeyIdentifier = keyid:always
+
 [ policy_anything ]
 countryName             = optional
 stateOrProvinceName     = optional

@@ -35,7 +35,7 @@ certs/ca.crt: private/ca.key
 		-sha256 -days 3650 -out certs/ca.crt -batch \
 		-subj "$(SUBJ)"
 
-private/ca.key: deps
+private/ca.key: | deps
 	openssl genrsa -out private/ca.key 2048
 
 # Generate a CRL from the current index.txt
