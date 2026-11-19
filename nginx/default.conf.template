@@ -22,7 +22,8 @@ map $ssl_client_s_dn $ssl_client_cn {
 }
 
 server {
-    resolver 8.8.8.8 valid=10s ipv6=off;
+    # Docker's embedded DNS
+    resolver 127.0.0.11 valid=10s ipv6=off;
 
     access_log /dev/stdout;
     error_log /dev/stderr debug;
@@ -36,8 +37,8 @@ server {
     ssl_certificate     /etc/nginx/certificate.pem;
     ssl_certificate_key /etc/nginx/key.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
 
     # This doesn't actually perform an ocsp check on the client cert,
     # it will only attempt to do an ocsp check on the self signed cert
@@ -47,7 +48,7 @@ server {
     ssl_verify_depth 4; # Allow intermediate CAs
     ssl_client_certificate /etc/nginx/ca.crt;
 
-    add_header Strict-Transport-Security max-age=15768000;
+    add_header Strict-Transport-Security "max-age=15768000; includeSubDomains" always;
 
     # Inform the proxied app which user had connected to this TLS endpoint
     add_header X-Subject-DN $ssl_client_s_dn;

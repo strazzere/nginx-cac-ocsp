@@ -4,6 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile.ocsp
     image: ocsp
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 9000), 2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - penryn.local
 
@@ -14,6 +19,9 @@ services:
       context: .
       dockerfile: Dockerfile.nginx-cac
     image: nginx-cac
+    depends_on:
+      ocsp.penryn.local:
+        condition: service_healthy
     networks:
       - penryn.local
     ports:
