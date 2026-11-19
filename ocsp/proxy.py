@@ -21,6 +21,13 @@ Configuration (environment variables):
                       0 disables caching). Never longer than the OCSP response's
                       nextUpdate or the certificate's own expiry. Also sent to nginx
                       as X-Accel-Expires so nginx can cache the auth subrequest too.
+  OCSP_MAX_RESPONSE_AGE  seconds an OCSP response without a nextUpdate stays acceptable
+                      (default: 3600). Stops an old "good" response being replayed forever.
+  OCSP_REQUIRE_NONCE  1 to reject responses that do not echo our request nonce
+                      (default: a nonce is sent and checked only if the responder echoes it)
+  OCSP_EXPOSE_DETAILS 1 to put the detailed failure reason in X-OCSP-Reason. By default clients
+                      only get a generic reason (details can name internal hosts); everything
+                      is always in the logs.
   OCSP_VERBOSE        1 to log extra detail for every request
 
 Revocations take up to OCSP_CACHE_TTL seconds to be noticed.
@@ -28,6 +35,7 @@ Revocations take up to OCSP_CACHE_TTL seconds to be noticed.
 import contextlib
 import datetime
 import os
+import re
 import sys
 import threading
 import time
@@ -45,6 +53,24 @@ from cryptography.x509 import ocsp
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
 UPN_OID = "1.3.6.1.4.1.311.20.2.3"
+# The UPN identifies the user to the downstream app, so it is passed through untouched or not
+# at all: never stripped or truncated, which could make two users look like one.
+UPN_RE = re.compile(r"[\x21-\x7e]{1,256}")
+
+# What clients are told. The detailed reason (which can contain internal host names,
+# library error text, ...) only goes to the logs unless OCSP_EXPOSE_DETAILS is set.
+PUBLIC_REASONS = {
+    "no-cert": "no client certificate",
+    "invalid-cert": "certificate could not be parsed",
+    "no-upn": "certificate has no UPN",
+    "invalid-upn": "certificate UPN is not acceptable",
+    "expired": "certificate has expired",
+    "not-yet-valid": "certificate is not valid yet",
+    "unknown-issuer": "certificate was not issued by a trusted CA",
+    "unknown": "certificate status is unknown",
+    "unreachable": "OCSP responder unavailable",
+    "error": "certificate status could not be verified",
+}
 MAX_FETCH_BYTES = 1024 * 1024
 CLOCK_SKEW = datetime.timedelta(minutes=5)
 MAX_CHAIN_DEPTH = 4
@@ -70,6 +96,9 @@ def _int_env(name, default):
 CACHE_TTL = _int_env("OCSP_CACHE_TTL", 60)
 CACHE_MAX_ENTRIES = 1000
 ISSUER_CACHE_TTL = 3600
+MAX_RESPONSE_AGE = _int_env("OCSP_MAX_RESPONSE_AGE", 3600)
+REQUIRE_NONCE = os.environ.get("OCSP_REQUIRE_NONCE", "").lower() in ("1", "true", "yes")
+EXPOSE_DETAILS = os.environ.get("OCSP_EXPOSE_DETAILS", "").lower() in ("1", "true", "yes")
 VERBOSE = os.environ.get("OCSP_VERBOSE", "").lower() in ("1", "true", "yes")
 
 TRUSTED_CAS = []
@@ -330,7 +359,13 @@ def verify_signature(resp, issuer, now):
 
 
 def check_ocsp(cert, issuer, url):
-    request = ocsp.OCSPRequestBuilder().add_certificate(cert, issuer, hashes.SHA1()).build()
+    nonce = os.urandom(16)
+    request = (
+        ocsp.OCSPRequestBuilder()
+        .add_certificate(cert, issuer, hashes.SHA1())
+        .add_extension(x509.OCSPNonce(nonce), critical=False)
+        .build()
+    )
     try:
         response = requests.post(
             url,
@@ -366,12 +401,24 @@ def check_ocsp(cert, issuer, url):
             or resp.issuer_name_hash != request.issuer_name_hash):
         raise Denied("error", "OCSP response is for a different certificate")
 
+    try:
+        echoed = resp.extensions.get_extension_for_class(x509.OCSPNonce).value.nonce
+    except x509.ExtensionNotFound:
+        echoed = None
+    if echoed is not None and echoed != nonce:
+        raise Denied("error", "OCSP response nonce does not match (replayed response?)")
+    if echoed is None and REQUIRE_NONCE:
+        raise Denied("error", "OCSP response did not echo the request nonce")
+
     this_update = utc(resp, "this_update")
     next_update = utc(resp, "next_update") if resp.next_update is not None else None
     if this_update > now + CLOCK_SKEW:
         raise Denied("error", "OCSP response is from the future")
     if next_update is not None and next_update < now - CLOCK_SKEW:
         raise Denied("error", "OCSP response is stale")
+    if next_update is None and echoed is None and now - this_update > datetime.timedelta(seconds=MAX_RESPONSE_AGE):
+        # No nextUpdate and no nonce: nothing else limits how long a (replayed) response is believed
+        raise Denied("error", "OCSP response is too old")
 
     if resp.certificate_status == ocsp.OCSPCertStatus.GOOD:
         return "good", "", next_update
@@ -414,6 +461,8 @@ def validate(header):
         return Result("no-upn", f"could not parse UPN: {e}")
     if upn is None:
         return Result("no-upn", "certificate has no UPN in its SAN")
+    if not UPN_RE.fullmatch(upn):
+        return Result("invalid-upn", f"UPN {upn[:50]!r} is empty, too long or has unsupported characters")
 
     # Cheap local checks are never cached
     now = now_utc()
@@ -489,6 +538,7 @@ def header_safe(value):
 
 class OCSPValidationHandler(BaseHTTPRequestHandler):
     server_version = "ocsp-proxy"
+    timeout = 10  # drop clients that connect and then stall (slowloris)
 
     def do_GET(self):
         try:
@@ -498,17 +548,20 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             result, code = Result("error", f"internal error: {e}"), 500
 
-        print(f"ocsp-proxy: status={result.status} cache={result.cache} upn={result.upn} reason={result.reason!r}", flush=True)
+        # repr() so certificate contents can't forge extra log lines
+        print(f"ocsp-proxy: status={result.status} cache={result.cache} upn={result.upn!r} reason={result.reason!r}", flush=True)
+
+        shown = result.reason if (EXPOSE_DETAILS or result.status == "revoked") else PUBLIC_REASONS.get(result.status, "")
 
         self.send_response(code)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", "0")
         self.send_header("X-OCSP-Status", result.status)
         self.send_header("X-OCSP-Cache", result.cache)
-        if result.reason:
-            self.send_header("X-OCSP-Reason", header_safe(result.reason))
-        if result.upn:
-            self.send_header("X-UPN", header_safe(result.upn))
+        if shown:
+            self.send_header("X-OCSP-Reason", header_safe(shown))
+        if result.upn and UPN_RE.fullmatch(result.upn):
+            self.send_header("X-UPN", result.upn)
         # Lets nginx cache this answer, for exactly as long as we would
         remaining = int(result.expires - time.time()) if result.expires else 0
         self.send_header("X-Accel-Expires", str(max(remaining, 0)))
