@@ -47,7 +47,8 @@ The OCSP proxy also understands (set them under `ocsp.environment` in `docker-co
 | Variable | Default | Purpose |
 |---|---|---|
 | `OCSP_ALLOWED_HOSTS` | `OCSP_HOST,CAC_HOST` | Hosts the proxy may contact for the OCSP / CA-issuer URLs found in a client certificate. Use `*` to allow any host, e.g. when testing against a real CA's responder. |
-| `OCSP_CACHE_TTL` | `60` | Seconds to cache `good` and `revoked` verdicts, `0` disables caching (see below) |
+| `OCSP_CACHE_TTL` | `60` | Seconds to cache `good` verdicts, `0` disables caching (see below) |
+| `OCSP_CACHE_TTL_REVOKED` | 10 x `OCSP_CACHE_TTL` | Seconds to cache `revoked` verdicts, which are rarely undone |
 | `OCSP_MAX_RESPONSE_AGE` | `3600` | Seconds an OCSP response with neither `nextUpdate` nor a nonce stays acceptable |
 | `OCSP_REQUIRE_NONCE` | _(off)_ | Reject responders that don't echo the request nonce (a nonce is always sent, and checked when echoed) |
 | `OCSP_EXPOSE_DETAILS` | _(off)_ | Put detailed failure reasons in `X-OCSP-Reason` (handy for debugging, but leaks internals) |
@@ -88,11 +89,11 @@ What you should still do:
 
 Checking OCSP on every request would be slow (a page with many assets would do dozens of lookups at once), so verdicts are cached, much as an F5 or any production setup would:
 
-* the proxy caches `good` and `revoked` results per certificate for `OCSP_CACHE_TTL` seconds, or less if the OCSP response's `nextUpdate` or the certificate's own expiry comes first. Concurrent requests for the same certificate share a single lookup, and downloaded issuer certs are cached for an hour.
+* the proxy caches `good` results per certificate for `OCSP_CACHE_TTL` seconds and `revoked` ones for `OCSP_CACHE_TTL_REVOKED` (revocation is hardly ever undone, so that can be longer), or less if the OCSP response's `nextUpdate` or the certificate's own expiry comes first. Concurrent requests for the same certificate share a single lookup, and downloaded issuer certs are cached for an hour.
 * the proxy tells nginx how long its answer is valid (`X-Accel-Expires`), so nginx caches the `auth_request` subrequest too and doesn't even call the proxy for repeat requests. nginx's cache is in memory and cleared when the container restarts.
 * errors (an unreachable responder, a bad response) and `unknown` are never cached.
 
-The cost is that a revocation takes up to `OCSP_CACHE_TTL` seconds to be noticed, so when testing a revocation either wait, restart the services (`docker compose restart ocsp cac`) or set `OCSP_CACHE_TTL=0`. Responses show where a verdict came from in `X-OCSP-Cache` (the proxy's cache, which reflects the original lookup) and `X-Auth-Cache` (`HIT` when nginx answered from its cache).
+The cost is that a revocation takes up to `OCSP_CACHE_TTL` seconds to be noticed. `make revoke CERT=client/yubico_client.pem` revokes a certificate and, if the services are running, restarts them to drop cached verdicts (`RESTART=no` skips that; so does `OCSP_CACHE_TTL=0`, which turns caching off altogether). Responses show where a verdict came from in `X-OCSP-Cache` (the proxy's cache, which reflects the original lookup) and `X-Auth-Cache` (`HIT` when nginx answered from its cache).
 
 ## Testing
 
@@ -102,10 +103,16 @@ The cost is that a revocation takes up to `OCSP_CACHE_TTL` seconds to be noticed
 * `test_revoked` - signed and then revoked
 * `test_expired` - signed, but already expired
 * `test_no_upn` - valid, but without a UPN in its SAN
+* `test_bad_upn` - valid, but with a non-ASCII UPN
+* `pki_leaf` / `pki_revoked` (`*_chain.pem` include the intermediate) - issued by an intermediate CA, see below
 
-`make test` starts the stack alongside a tiny downstream that echoes headers, runs `curl` against every case above (once with caching on and once with `OCSP_CACHE_TTL=0`), and tears everything down again. It needs docker and the certs from `make`.
+`make test` starts the stack alongside a tiny downstream that echoes headers, runs `curl` against every case above (once with caching on and once with `OCSP_CACHE_TTL=0`), and tears everything down again. It also covers revoking a certificate while the responder is running, many concurrent requests sharing one lookup, idle connections not blocking the responder, and the responder going down and coming back. It needs docker and the certs from `make`.
 
-_Note: don't open and close a bare TCP connection to the OCSP responder's port (2560), e.g. with a port scanner or a naive healthcheck. The `openssl ocsp` server is single threaded and gets stuck on the empty connection. Send it a real OCSP request instead (see the healthcheck in `docker-compose.yml`)._
+### The OCSP responder
+
+The responder (`ocsp/responder.py`) answers from the CA database in `ca/db/index.txt`, which `docker compose` mounts into the container and which it re-reads whenever the file changes, so a revocation (`make revoke CERT=...`, or `openssl ca -revoke`) takes effect without rebuilding anything. It signs with `ocsp/ocsp_key.pem`, echoes the request nonce, sets `nextUpdate` (`RESPONDER_NEXT_UPDATE`, default one hour), and handles several clients at once, timing out any that stall.
+
+The same code is used by the test-only `realpki` service to imitate somebody else's PKI: a root (our CA) -> intermediate -> client cert hierarchy where the intermediate is only served as a PKCS#7 bundle from the certificate's `caIssuers` URL, and its OCSP responder is a delegated signer that doesn't support nonces and rejects a `Host` header containing a port, like some real responders do. This is what the `pki_*` certificates are tested against.
 
 ## Troubleshooting
 

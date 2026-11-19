@@ -61,7 +61,7 @@ $ ykman piv keys import 9a yubico_client.key
 Private key imported into slot AUTHENTICATION.
 ```
 
-Sign the CSR and ensure it is added to the index.txt for OCSP verification;
+Sign the CSR and ensure it is added to the CA database (`../ca/db/index.txt`) for OCSP verification;
 ```sh
 openssl ca -in yubico_client.csr -out yubico_client.pem -cert ../ca/certs/ca.crt -keyfile ../ca/private/ca.key -days 1024 -config ../config/openssl_config.cnf -extensions req_ext -batch 
 ```

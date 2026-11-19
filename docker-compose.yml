@@ -11,6 +11,8 @@ services:
       OCSP_ALLOWED_HOSTS: ${OCSP_ALLOWED_HOSTS:-}
       # Seconds to cache good/revoked verdicts (0 disables). Revocations take this long to be noticed.
       OCSP_CACHE_TTL: ${OCSP_CACHE_TTL:-60}
+      # Seconds to cache revoked verdicts (default: ten times OCSP_CACHE_TTL)
+      OCSP_CACHE_TTL_REVOKED: ${OCSP_CACHE_TTL_REVOKED:-}
       OCSP_VERBOSE: ${OCSP_VERBOSE:-}
     # Nothing here needs to write to disk, gain privileges or use any capability
     read_only: true
@@ -73,6 +75,35 @@ services:
     entrypoint: ["python3", "/echo.py"]
     volumes:
       - ./test/echo.py:/echo.py:ro
+    depends_on:
+      - ocsp
+    networks:
+      - cac
+
+  # Test-only stand-in for somebody else's PKI, used by `make test`: it serves an intermediate CA as a
+  # PKCS#7 bundle (what a caIssuers URL usually returns) and an OCSP responder for that CA which, unlike
+  # ours, doesn't support nonces and rejects a Host header that contains a port.
+  realpki:
+    profiles: ["test"]
+    image: ocsp
+    entrypoint: ["python3", "/etc/ocsp/responder.py"]
+    environment:
+      RESPONDER_INDEX: /pki/index.txt
+      RESPONDER_CA: /pki/int.pem
+      RESPONDER_CERT: /pki/resp.pem
+      RESPONDER_KEY: /pki/resp.key
+      RESPONDER_PORT: "8080"
+      RESPONDER_ECHO_NONCE: "0"
+      RESPONDER_STRICT_HOST: "1"
+      RESPONDER_NEXT_UPDATE: "86400"
+      RESPONDER_STATIC: /int.p7c=/pki/int.p7c
+    volumes:
+      - ./client/pki:/pki:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:8080/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     depends_on:
       - ocsp
     networks:
