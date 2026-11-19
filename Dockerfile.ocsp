@@ -1,7 +1,14 @@
 FROM alpine:latest
 
-RUN apk update && apk add openssl python3 py3-requests py3-cryptography && mkdir -p /etc/ocsp
+RUN apk add --no-cache python3 py3-requests py3-cryptography \
+    && adduser -D -H -s /sbin/nologin ocsp \
+    && mkdir -p /etc/ocsp
 
-COPY ca/index.txt ocsp/proxy.py ocsp/ocsp.sh ocsp/ocsp_cert.pem ocsp/ocsp_key.pem ca/certs/ca.crt /etc/ocsp/
+# The CA database (index.txt) is not baked in: docker-compose mounts ca/db at /etc/ocsp/db
+# so that revocations are picked up without rebuilding.
+COPY --chown=ocsp:ocsp ocsp/proxy.py ocsp/responder.py ocsp/ocsp.sh ocsp/ocsp_cert.pem ocsp/ocsp_key.pem ca/certs/ca.crt /etc/ocsp/
+
+# Neither the responder (2560) nor the proxy (9000) needs privileges
+USER ocsp
 
 ENTRYPOINT [ "/etc/ocsp/ocsp.sh" ]

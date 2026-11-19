@@ -4,6 +4,7 @@ server {
     error_log /dev/stderr;
 
     listen 80;
+    server_name ${CAC_HOST};
 
     # Explicitly allow access to ca.crt without mTLS
     location = /ca.crt {
@@ -12,20 +13,29 @@ server {
 
     # Redirect all other requests to HTTPS
     location / {
+        # Always redirect to our own name, never to whatever Host header the client sent
         return 301 https://$server_name$request_uri;
     }
 }
 
+# Cache of OCSP verdicts. How long an entry lives is decided by the proxy (X-Accel-Expires),
+# which only sends a lifetime for definitive good/revoked answers: errors and
+# unreachable responders are never cached. OCSP_CACHE_TTL=0 on the proxy disables this.
+proxy_cache_path /var/cache/nginx/ocsp levels=1:2 keys_zone=ocsp_auth:1m max_size=10m inactive=10m;
+
+# Extract the CN from the (RFC 2253 formatted) subject DN, honouring escaped commas.
+# Empty when there is no CN, in which case requests are rejected.
 map $ssl_client_s_dn $ssl_client_cn {
-    "~CN=([^,]+)" $1; # Extract CN
-    default "error extracting eipid";
+    "~(?:^|,)CN=((?:[^,\\\\]|\\\\.)+)" $1;
+    default "";
 }
 
 server {
-    resolver 8.8.8.8 valid=10s ipv6=off;
+    # Docker's embedded DNS
+    resolver 127.0.0.11 valid=10s ipv6=off;
 
     access_log /dev/stdout;
-    error_log /dev/stderr debug;
+    error_log /dev/stderr info;
 
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
@@ -36,8 +46,10 @@ server {
     ssl_certificate     /etc/nginx/certificate.pem;
     ssl_certificate_key /etc/nginx/key.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    # Ticket keys live as long as the worker does, which defeats forward secrecy
+    ssl_session_tickets off;
 
     # This doesn't actually perform an ocsp check on the client cert,
     # it will only attempt to do an ocsp check on the self signed cert
@@ -47,23 +59,26 @@ server {
     ssl_verify_depth 4; # Allow intermediate CAs
     ssl_client_certificate /etc/nginx/ca.crt;
 
-    add_header Strict-Transport-Security max-age=15768000;
-
-    # Inform the proxied app which user had connected to this TLS endpoint
-    add_header X-Subject-DN $ssl_client_s_dn;
-    add_header X-Client-Verified $ssl_client_verify;
-    add_header X-Client-CN $ssl_client_cn;
-
     root /www/data;
 
-    # Capture client certificate errors as needed;
-    # https://nginx.org/en/docs/http/ngx_http_ssl_module.html#errors
-    error_page 495 496 497 = /error_no_cac.html;
+    # Values filled in by the ocsp-validate auth_request (see below)
+    set $ocsp_status "";
+    set $ocsp_reason "";
+    set $ocsp_cache "";
+    set $auth_cache "";
 
-    # Serve the custom error page for no client certificate
+    # Client certificate errors, rejected by nginx before any location is reached;
+    # https://nginx.org/en/docs/http/ngx_http_ssl_module.html#errors
+    # The page is friendly, but the status code must still say what went wrong.
+    error_page 495 =403 /error_no_cac.html;    # invalid/untrusted/expired client cert
+    error_page 496 =401 /error_no_cac.html;    # no client cert
+    error_page 497 =400 /error_no_cac.html;    # plain http sent to the https port
+
     location = /error_no_cac.html {
         root /www/errors;
         internal;
+        include /etc/nginx/snippets/cac_headers.conf;
+        include /etc/nginx/snippets/cac_page_headers.conf;
     }
 
     # Use an auth_request to check OCSP status
@@ -72,75 +87,88 @@ server {
     location = /ocsp-validate {
         internal;
 
-        # Call a script to validate the client cert against an OCSP server
-        proxy_pass http://ocsp.penryn.local:9000/;
+        # The proxy checks the cert against the OCSP server. $ssl_client_escaped_cert
+        # is a single line, so it survives being sent as a header intact.
+        proxy_pass http://${OCSP_HOST}:9000/;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
-        proxy_set_header X-Client-Cert $ssl_client_cert;
+        proxy_set_header X-Client-Cert $ssl_client_escaped_cert;
+
+        # One lookup per client cert, shared by all concurrent requests (e.g. page assets)
+        proxy_cache ocsp_auth;
+        # The whole certificate (not its SHA-1 fingerprint, which is collision-prone). nginx
+        # compares the full key on lookup, so there is no hash-collision risk either.
+        proxy_cache_key $ssl_client_escaped_cert;
+        proxy_cache_lock on;
     }
 
+    # Shows what nginx knows about the client; 200 only if the cert passes OCSP
     location = /cac-test {
-        error_page 495 =404 /error_no_cac.html;
-        error_page 403 =403 @handle_cac_test_403;
-
-        # Explicitly catch the NONE case and redirect
-        if ($ssl_client_verify = NONE) {
-            return 495;
-        }
+        error_page 403 =403 @cac_test_denied;
 
         auth_request /ocsp-validate;
-
         auth_request_set $ssl_client_upn $upstream_http_x_upn;
-        auth_request_set $auth_status $upstream_status;
+        auth_request_set $ocsp_status $upstream_http_x_ocsp_status;
+        auth_request_set $ocsp_reason $upstream_http_x_ocsp_reason;
+        auth_request_set $ocsp_cache $upstream_http_x_ocsp_cache;
+        auth_request_set $auth_cache $upstream_cache_status;
 
-        if ($auth_status = 200) {
-            add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure";
-            # Directly serve the file for `/cac-test`
-            return 200;
-        }
+        include /etc/nginx/snippets/cac_headers.conf;
+        include /etc/nginx/snippets/cac_page_headers.conf;
+        add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure; SameSite=Strict";
 
         ssi on;
-
         root /www/data;
-        index index.html;
-
-        # Explicitly serve index.html for `/cac-test`
         try_files /index.html =404;
     }
 
-    # Catch 403 errors from the ocsp-validation layer specifically for the cac-test
-    location @handle_cac_test_403 {
+    # Same page, with the 403 the auth_request produced
+    location @cac_test_denied {
+        include /etc/nginx/snippets/cac_headers.conf;
+        include /etc/nginx/snippets/cac_page_headers.conf;
+
         ssi on;
         root /www/data;
-        index index.html;
         try_files /index.html =404;
+    }
+
+    # Failed OCSP check. A named location (unlike an error_page URI) keeps the
+    # variables set by auth_request_set, so the X-OCSP-* headers survive.
+    location @denied {
+        root /www/errors;
+        include /etc/nginx/snippets/cac_headers.conf;
+        include /etc/nginx/snippets/cac_page_headers.conf;
+        try_files /error_no_cac.html =404;
     }
 
     location / {
-        error_page 495 =495 /error_no_cac.html;
-        error_page 403 =403 /error_no_cac.html;
+        error_page 403 =403 @denied;
 
-        # Explicitly catch the NONE case and redirect
-        if ($ssl_client_verify = NONE) {
-            return 495;
+        # No (extractable) CN means we have nothing to identify the user by
+        if ($ssl_client_cn = "") {
+            return 403;
         }
 
         auth_request /ocsp-validate;
+        auth_request_set $ssl_client_upn $upstream_http_x_upn;
+        auth_request_set $ocsp_status $upstream_http_x_ocsp_status;
+        auth_request_set $ocsp_reason $upstream_http_x_ocsp_reason;
+        auth_request_set $ocsp_cache $upstream_http_x_ocsp_cache;
+        auth_request_set $auth_cache $upstream_cache_status;
 
-        auth_request_set $auth_status $upstream_status;
+        include /etc/nginx/snippets/cac_headers.conf;
+        add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure; SameSite=Strict";
 
-        if ($auth_status = 200) {
-            add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure";
-        }
+        # No `ssi on` here: nginx would execute SSI directives found in the downstream app's
+        # responses (e.g. reflected user input), which can leak variables such as $ssl_client_cert.
 
-        autoindex on;
-        ssi on;
-
+        # Tell the downstream app who connected. Setting these always replaces
+        # any value the client may have tried to send itself.
         proxy_set_header ssl_client_cn $ssl_client_cn;
+        proxy_set_header X-Client-UPN $ssl_client_upn;
+        proxy_set_header X-Client-CN $ssl_client_cn;
+        proxy_set_header X-Client-Verified $ssl_client_verify;
+        proxy_set_header X-Subject-DN $ssl_client_s_dn;
         proxy_pass http://${DOWNSTREAM_SERVICE};
-    }
-
-    location @error403 {
-        return 403;
     }
 }

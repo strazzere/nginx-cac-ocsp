@@ -6,7 +6,7 @@ dir             = ../ca      # Directory where everything is kept
 certs           = $dir/certs    # Where the issued certs are kept
 crl_dir         = $dir/crl      # Where the issued crl are kept
 new_certs_dir   = $dir/newcerts # default place for new certs
-database        = $dir/index.txt# database index file.
+database        = $dir/db/index.txt # database index file (in its own directory so it can be mounted)
 serial          = $dir/serial   # The current serial number
 RANDFILE        = $dir/private/.rand # Private random number file
 
@@ -24,6 +24,9 @@ default_md      = sha256               # use SHA-256 by default
 preserve        = no                   # keep passed DN ordering
 
 policy          = policy_anything
+
+[ crl_ext ]
+authorityKeyIdentifier = keyid:always
 
 [ policy_anything ]
 countryName             = optional
@@ -44,12 +47,37 @@ countryName_default = US
 
 [ req_ext ]
 subjectAltName = @alt_names
-authorityInfoAccess = OCSP;URI:http://ocsp.penryn.local:2560,caIssuers;URI:http://cac.penryn.local/ca.crt
+authorityInfoAccess = OCSP;URI:http://${ENV::OCSP_HOST}:2560,caIssuers;URI:http://${ENV::CAC_HOST}/ca.crt
 
 [ alt_names ]
 otherName.0 = 2.16.840.1.101.3.6.6;UTF8:<unsupported>
 otherName.1 = 1.3.6.1.4.1.311.20.2.3;UTF8:1234567890123456@notmil
 URI.1 = urn:uuid:D1FFD1FF-D1FF-D1FF-D1FF-D1FFD1FFD1FF
+
+# A cert with an email SAN but no UPN, used to test the "no UPN" path
+[ noupn_ext ]
+subjectAltName = email:john.doe.civ@fake.mil
+authorityInfoAccess = OCSP;URI:http://${ENV::OCSP_HOST}:2560,caIssuers;URI:http://${ENV::CAC_HOST}/ca.crt
+
+# A UPN with a non-ASCII character, which must be rejected rather than mangled
+[ badupn_ext ]
+subjectAltName = @alt_badupn
+authorityInfoAccess = OCSP;URI:http://${ENV::OCSP_HOST}:2560,caIssuers;URI:http://${ENV::CAC_HOST}/ca.crt
+
+[ alt_badupn ]
+otherName.1 = 1.3.6.1.4.1.311.20.2.3;UTF8:jöhn@notmil
+
+# A "real world" style PKI for tests: root (our CA) -> intermediate -> client cert, where the
+# intermediate and the OCSP responder live on a different host (`realpki`, see docker-compose.yml)
+[ v3_int ]
+basicConstraints = critical,CA:TRUE,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+
+[ pki_leaf_ext ]
+subjectAltName = @alt_names
+authorityInfoAccess = OCSP;URI:http://realpki:8080/ocsp,caIssuers;URI:http://realpki:8080/int.p7c
 
 [ ocsp_ext ]
 keyUsage = digitalSignature

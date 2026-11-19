@@ -1,0 +1,2 @@
+V	290101000000Z		1001	unknown	/CN=pki_leaf
+R	290101000000Z	261119000000Z,keyCompromise	1002	unknown	/CN=pki_revoked

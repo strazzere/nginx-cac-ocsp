@@ -61,7 +61,7 @@ $ ykman piv keys import 9a yubico_client.key
 Private key imported into slot AUTHENTICATION.
 ```
 
-Sign the CSR and ensure it is added to the index.txt for OCSP verification;
+Sign the CSR and ensure it is added to the CA database (`../ca/db/index.txt`) for OCSP verification;
 ```sh
 openssl ca -in yubico_client.csr -out yubico_client.pem -cert ../ca/certs/ca.crt -keyfile ../ca/private/ca.key -days 1024 -config ../config/openssl_config.cnf -extensions req_ext -batch 
 ```
@@ -73,6 +73,17 @@ Enter a management key [blank to use default key]:
 Enter PIN: 
 Certificate imported into slot AUTHENTICATION
 ```
+
+### Extra certificates for edge cases
+`make` also creates certificates for testing how an application reacts to bad ones:
+
+| Files | What's wrong with it |
+|---|---|
+| `test_expired.{key,pem}` | expired in 2020 |
+| `test_revoked.{key,pem}` | revoked in the CA database |
+| `test_no_upn.{key,pem}` | has an email SAN but no UPN |
+
+These are used by `make test` at the top level, but work just as well with `curl --cert test_revoked.pem --key test_revoked.key ...`.
 
 ### Manually verifying the cert via OCSP
 _Note: The docker container does not expose the OCSP daemon, so this would only work if you're running the OCSP daemon locally and it is reachable.

@@ -1,23 +1,113 @@
 services:
-  ocsp.penryn.local:
+  ocsp:
     build:
       context: .
       dockerfile: Dockerfile.ocsp
     image: ocsp
-    networks:
-      - penryn.local
-
-  cac.penryn.local:
     environment:
-      DOWNSTREAM_SERVICE: "www.penryn.com"
+      OCSP_HOST: ${OCSP_HOST:-ocsp.penryn.local}
+      CAC_HOST: ${CAC_HOST:-cac.penryn.local}
+      # Hosts we may contact for AIA urls found in client certs (default: OCSP_HOST,CAC_HOST, `*` for any)
+      OCSP_ALLOWED_HOSTS: ${OCSP_ALLOWED_HOSTS:-}
+      # Seconds to cache good/revoked verdicts (0 disables). Revocations take this long to be noticed.
+      OCSP_CACHE_TTL: ${OCSP_CACHE_TTL:-60}
+      # Seconds to cache revoked verdicts (default: ten times OCSP_CACHE_TTL)
+      OCSP_CACHE_TTL_REVOKED: ${OCSP_CACHE_TTL_REVOKED:-}
+      OCSP_VERBOSE: ${OCSP_VERBOSE:-}
+    # Nothing here needs to write to disk, gain privileges or use any capability
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # The CA database, so a revocation (`make revoke`) is picked up straight away
+      - ./ca/db:/etc/ocsp/db:ro
+    healthcheck:
+      # Both the OCSP responder and the validation proxy must answer
+      test: ["CMD", "python3", "-c", "import urllib.request as u; [u.urlopen(f'http://localhost:{p}/healthz', timeout=3) for p in (2560, 9000)]"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      cac:
+        aliases:
+          - ${OCSP_HOST:-ocsp.penryn.local}
+
+  cac:
+    environment:
+      DOWNSTREAM_SERVICE: ${DOWNSTREAM_SERVICE:-www.penryn.com}
+      OCSP_HOST: ${OCSP_HOST:-ocsp.penryn.local}
+      CAC_HOST: ${CAC_HOST:-cac.penryn.local}
     build:
       context: .
       dockerfile: Dockerfile.nginx-cac
     image: nginx-cac
+    depends_on:
+      ocsp:
+        condition: service_healthy
     networks:
-      - penryn.local
+      cac:
+        aliases:
+          - ${CAC_HOST:-cac.penryn.local}
+    # Read-only root filesystem: nginx only writes to these in-memory directories
+    # (the verdict cache is dropped on restart). The master process starts as root to bind
+    # 443 and read the key, then hands the workers to the unprivileged nginx user.
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/log/nginx
+      - /run/nginx
+      - /var/lib/nginx/tmp:mode=1777
+      - /etc/nginx/http.d
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN, DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - "8443:443"
+      # Loopback only by default; set BIND_ADDR=0.0.0.0 to expose it to your network
+      - "${BIND_ADDR:-127.0.0.1}:8443:443"
+
+  # Test-only downstream that echoes the request headers it receives, used by `make test`:
+  #   DOWNSTREAM_SERVICE=echo:8080 docker compose --profile test up
+  echo:
+    profiles: ["test"]
+    image: ocsp
+    entrypoint: ["python3", "/echo.py"]
+    volumes:
+      - ./test/echo.py:/echo.py:ro
+    depends_on:
+      - ocsp
+    networks:
+      - cac
+
+  # Test-only stand-in for somebody else's PKI, used by `make test`: it serves an intermediate CA as a
+  # PKCS#7 bundle (what a caIssuers URL usually returns) and an OCSP responder for that CA which, unlike
+  # ours, doesn't support nonces and rejects a Host header that contains a port.
+  realpki:
+    profiles: ["test"]
+    image: ocsp
+    entrypoint: ["python3", "/etc/ocsp/responder.py"]
+    environment:
+      RESPONDER_INDEX: /pki/index.txt
+      RESPONDER_CA: /pki/int.pem
+      RESPONDER_CERT: /pki/resp.pem
+      RESPONDER_KEY: /pki/resp.key
+      RESPONDER_PORT: "8080"
+      RESPONDER_ECHO_NONCE: "0"
+      RESPONDER_STRICT_HOST: "1"
+      RESPONDER_NEXT_UPDATE: "86400"
+      RESPONDER_STATIC: /int.p7c=/pki/int.p7c
+    volumes:
+      - ./client/pki:/pki:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:8080/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      - ocsp
+    networks:
+      - cac
 
 networks:
-  penryn.local:
+  cac:

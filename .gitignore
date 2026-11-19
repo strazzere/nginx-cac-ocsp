@@ -4,4 +4,9 @@
 *.srl
 *.key
 ca/index.txt*
+ca/db/
 ca/serial*
+cache.json
+*~
+.vscode/
+ca/crlnumber*
