@@ -8,6 +8,7 @@ COPY ca/certs/ca.crt /www/cert/
 
 COPY nginx/default.conf.template  /etc/nginx/templates/default.conf.template
 COPY nginx/cac_headers.conf       /etc/nginx/snippets/cac_headers.conf
+COPY nginx/cac_page_headers.conf  /etc/nginx/snippets/cac_page_headers.conf
 COPY nginx/index.html             /www/data/index.html
 COPY nginx/error_no_cac.html      /www/errors/error_no_cac.html
 
@@ -16,4 +17,4 @@ EXPOSE 80/tcp
 
 # The master process needs root to bind 80/443 and read the key, but the
 # worker processes run as the unprivileged `nginx` user (alpine's default).
-CMD ["sh", "-c", "envsubst '${DOWNSTREAM_SERVICE} ${OCSP_HOST}' < /etc/nginx/templates/default.conf.template > /etc/nginx/http.d/default.conf && nginx -g 'daemon off;'"]
+CMD ["sh", "-c", "envsubst '${DOWNSTREAM_SERVICE} ${OCSP_HOST} ${CAC_HOST}' < /etc/nginx/templates/default.conf.template > /etc/nginx/http.d/default.conf && nginx -g 'daemon off;'"]

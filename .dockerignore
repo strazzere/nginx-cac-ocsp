@@ -10,5 +10,6 @@
 !nginx/key.pem
 !nginx/default.conf.template
 !nginx/cac_headers.conf
+!nginx/cac_page_headers.conf
 !nginx/index.html
 !nginx/error_no_cac.html

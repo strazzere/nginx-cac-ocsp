@@ -29,6 +29,7 @@ services:
     environment:
       DOWNSTREAM_SERVICE: ${DOWNSTREAM_SERVICE:-www.penryn.com}
       OCSP_HOST: ${OCSP_HOST:-ocsp.penryn.local}
+      CAC_HOST: ${CAC_HOST:-cac.penryn.local}
     build:
       context: .
       dockerfile: Dockerfile.nginx-cac
@@ -44,7 +45,8 @@ services:
     tmpfs:
       - /var/cache/nginx
     ports:
-      - "8443:443"
+      # Loopback only by default; set BIND_ADDR=0.0.0.0 to expose it to your network
+      - "${BIND_ADDR:-127.0.0.1}:8443:443"
 
   # Test-only downstream that echoes the request headers it receives, used by `make test`:
   #   DOWNSTREAM_SERVICE=echo:8080 docker compose --profile test up
