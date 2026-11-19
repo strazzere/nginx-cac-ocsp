@@ -15,7 +15,7 @@ ocsp_req.csr: ocsp_key.pem
 ocsp_cert.pem: ocsp_req.csr
 	openssl x509 -req -in ocsp_req.csr -CA ../ca/certs/ca.crt \
 	-CAkey ../ca/private/ca.key -out ocsp_cert.pem \
-	-CAcreateserial -out ocsp_cert.pem -days 365 \
+	-CAcreateserial -out ocsp_cert.pem -days 3650 \
 	-extfile ../config/openssl_config.cnf -extensions ocsp_ext
 
 clean:

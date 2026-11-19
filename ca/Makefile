@@ -23,7 +23,7 @@ deps: index.txt serial
 
 certs/ca.crt: private/ca.key
 	openssl req -x509 -new -nodes -key private/ca.key \
-		-sha256 -days 365 -out certs/ca.crt -batch \
+		-sha256 -days 3650 -out certs/ca.crt -batch \
 		-subj "$(SUBJ)"
 
 private/ca.key:

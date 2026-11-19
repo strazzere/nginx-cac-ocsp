@@ -10,7 +10,7 @@ SUBJ = /C=$(COUNTRY)/ST=$(STATE)/O=$(ORG)/CN=$(CN)
 cert: certificate.pem
 
 certificate.pem: key.pem
-	openssl req -batch -sha256 -days 365             \
+	openssl req -batch -sha256 -days 3650             \
 	    -new -x509 -key key.pem -out certificate.pem \
 	    -subj "$(SUBJ)"
 
