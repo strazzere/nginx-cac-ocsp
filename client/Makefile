@@ -55,6 +55,10 @@ test_no_upn.pem: test_no_upn.key
 test_bad_upn.pem: test_bad_upn.key
 	openssl ca -in test_bad_upn.csr -out $@ -days 1024 -extensions badupn_ext $(CA_ARGS)
 
+# A fresh, valid cert for tests that revoke it (not part of `all`; see test/run.sh)
+test_live.pem: test_live.key
+	openssl ca -in test_live.csr -out $@ -days 1024 -extensions req_ext $(CA_ARGS)
+
 # Revoke the main client cert in the CA database (a no-op if it was never issued)
 revoke_csr:
 	@if [ -f yubico_client.pem ]; then \

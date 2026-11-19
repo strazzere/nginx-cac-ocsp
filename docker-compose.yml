@@ -17,11 +17,12 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    volumes:
+      # The CA database, so a revocation (`make revoke`) is picked up straight away
+      - ./ca/db:/etc/ocsp/db:ro
     healthcheck:
-      # Send the responder a real OCSP request (the status of the answer does not matter) and check
-      # the proxy port. Never just open and close a connection to 2560: that wedges the
-      # single threaded `openssl ocsp` responder.
-      test: ["CMD-SHELL", "openssl ocsp -issuer /etc/ocsp/ca.crt -cert /etc/ocsp/ocsp_cert.pem -url http://localhost:2560 -CAfile /etc/ocsp/ca.crt -timeout 3 >/dev/null 2>&1 && python3 -c \"import socket; socket.create_connection(('localhost', 9000), 2)\""]
+      # Both the OCSP responder and the validation proxy must answer
+      test: ["CMD", "python3", "-c", "import urllib.request as u; [u.urlopen(f'http://localhost:{p}/healthz', timeout=3) for p in (2560, 9000)]"]
       interval: 5s
       timeout: 5s
       retries: 5

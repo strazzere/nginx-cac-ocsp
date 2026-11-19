@@ -547,6 +547,11 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
     timeout = 10  # drop clients that connect and then stall (slowloris)
 
     def do_GET(self):
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         try:
             result = validate(self.headers.get("X-Client-Cert"))
             code = result.code

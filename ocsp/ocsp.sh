@@ -1,11 +1,12 @@
 #!/bin/sh
 
-# Run the OpenSSL OCSP responder in the background
-openssl ocsp -index /etc/ocsp/index.txt -port 2560 -rsigner /etc/ocsp/ocsp_cert.pem -rkey /etc/ocsp/ocsp_key.pem -CA /etc/ocsp/ca.crt -timeout 2 -text &
-OCSP_PID=$!
-
 # Ensure we can easily push our print statements from python
 export PYTHONUNBUFFERED=1
+
+# Run the OCSP responder in the background
+python3 /etc/ocsp/responder.py &
+OCSP_PID=$!
+
 # Run the Python proxy in the background
 python3 /etc/ocsp/proxy.py &
 PROXY_PID=$!

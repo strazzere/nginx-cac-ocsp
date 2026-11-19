@@ -6,7 +6,7 @@ dir             = ../ca      # Directory where everything is kept
 certs           = $dir/certs    # Where the issued certs are kept
 crl_dir         = $dir/crl      # Where the issued crl are kept
 new_certs_dir   = $dir/newcerts # default place for new certs
-database        = $dir/index.txt# database index file.
+database        = $dir/db/index.txt # database index file (in its own directory so it can be mounted)
 serial          = $dir/serial   # The current serial number
 RANDFILE        = $dir/private/.rand # Private random number file
 

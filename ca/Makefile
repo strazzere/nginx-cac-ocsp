@@ -14,12 +14,19 @@ all: ca
 
 ca: deps certs/ca.crt
 
-index.txt:
-	touch index.txt
+# The CA database lives in its own directory so that it can be mounted into the OCSP
+# responder: openssl replaces index.txt on every write, which a single file mount would miss.
+db:
+	mkdir -p db
+	# move the database from where it used to live
+	@for f in index.txt index.txt.attr index.txt.old index.txt.attr.old; do [ -f $$f ] && mv $$f db/ || true; done
+
+db/index.txt: | db
+	@[ -f $@ ] || touch $@
 
 # Allow several certs with the same subject (e.g. re-issuing after a clean)
-index.txt.attr:
-	echo "unique_subject = no" > index.txt.attr
+db/index.txt.attr: | db
+	@[ -f $@ ] || echo "unique_subject = no" > $@
 
 serial:
 	echo 01 > serial
@@ -27,7 +34,7 @@ serial:
 crlnumber:
 	echo 01 > crlnumber
 
-deps: index.txt index.txt.attr serial crlnumber
+deps: db/index.txt db/index.txt.attr serial crlnumber
 	mkdir -p certs newcerts private
 
 certs/ca.crt: private/ca.key
@@ -43,4 +50,4 @@ crl: ca
 	openssl ca -gencrl -config ../config/openssl_config.cnf -out crl.pem
 
 clean:
-	@rm -rf certs/* newcerts/* private/* crl.pem crlnumber crlnumber.old index.txt index.txt.attr index.txt.old index.txt.attr.old serial serial.old
+	@rm -rf certs/* newcerts/* private/* crl.pem crlnumber crlnumber.old index.txt index.txt.attr index.txt.old index.txt.attr.old serial serial.old db

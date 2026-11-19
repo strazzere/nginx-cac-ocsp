@@ -1,8 +1,8 @@
 # Only send the files the Dockerfiles actually COPY (keeps the CA key, client keys and .git out of the build context)
 *
-!ca/index.txt
 !ca/certs/ca.crt
 !ocsp/proxy.py
+!ocsp/responder.py
 !ocsp/ocsp.sh
 !ocsp/ocsp_cert.pem
 !ocsp/ocsp_key.pem
