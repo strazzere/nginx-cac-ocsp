@@ -28,7 +28,50 @@ This project consists of a few components:
 
 To build the project, simply run `make`. This will generate all the certificates required for each service. You will need to manually import the generated client keys onto a `YubiKey` or another key-holding device. Alternatively, you can use the certificates directly for `curl` requests.
 
-After generating the certificates and configuring your local machine for using CAC devices in Chrome or Firefox, you can run `make run` to start the services. The services will be reachable at `https://0.0.0.0:8443`, as defined in the `docker-compose.yml`.
+After generating the certificates and configuring your local machine for using CAC devices in Chrome or Firefox, you can run `make run` to start the services. The services will be reachable at `https://0.0.0.0:8443`, as defined in the `docker-compose.yml`. Generated certificates are valid for ten years (the client certs for just under three).
+
+## Configuration
+
+Hostnames live in `.env`, which is read by both the Makefiles and `docker compose`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OCSP_HOST` | `ocsp.penryn.local` | Hostname of the OCSP responder (baked into the certs' AIA extension) |
+| `CAC_HOST` | `cac.penryn.local` | Hostname of the nginx server (also serves `ca.crt` over http) |
+| `DOWNSTREAM_SERVICE` | `www.penryn.com` | The app nginx proxies authenticated requests to |
+
+Changing the hostnames means regenerating the certs (`make clean && make`).
+
+The OCSP proxy also understands (set them under `ocsp.environment` in `docker-compose.yml`, or in your shell):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OCSP_ALLOWED_HOSTS` | `OCSP_HOST,CAC_HOST` | Hosts the proxy may contact for the OCSP / CA-issuer URLs found in a client certificate. Use `*` to allow any host, e.g. when testing against a real CA's responder. |
+| `OCSP_VERBOSE` | _(off)_ | Set to `1` for detailed per-request logging |
+
+## What the services tell you
+
+For every request nginx asks the proxy whether the client certificate is acceptable. The result is exposed in:
+
+* the HTTP status: `200` accepted, `401` no certificate sent, `403` anything else (revoked, expired, untrusted, no UPN, ...)
+* an `X-OCSP-Status` response header: `good`, `revoked`, `unknown`, `expired`, `not-yet-valid`, `no-upn`, `invalid-cert`, `unknown-issuer`, `unreachable` or `error`, with details in `X-OCSP-Reason`
+
+Requests that pass are proxied to `DOWNSTREAM_SERVICE` with `X-Client-UPN`, `X-Client-CN`, `X-Client-Verified` and `X-Subject-DN` headers. These always overwrite anything the client sent itself, and the downstream app should only trust them if it is reachable exclusively through this nginx. `/cac-test` shows what nginx knows about your certificate without needing a downstream.
+
+Certificates the proxy checks: the issuer must chain to `ca/certs/ca.crt`. Intermediates may be fetched from the certificate's `caIssuers` URL (PEM, DER or PKCS#7), but only from `OCSP_ALLOWED_HOSTS` and they are never trusted unless they chain to the trusted CA.
+
+## Testing
+
+`make` creates the CA, the responder/server certs and a handful of client certs in `client/`:
+
+* `yubico_client` - valid
+* `test_revoked` - signed and then revoked
+* `test_expired` - signed, but already expired
+* `test_no_upn` - valid, but without a UPN in its SAN
+
+`make test` starts the stack alongside a tiny downstream that echoes headers, runs `curl` against every case above, and tears everything down again. It needs docker and the certs from `make`.
+
+_Note: don't open and close a bare TCP connection to the OCSP responder's port (2560), e.g. with a port scanner or a naive healthcheck. The `openssl ocsp` server is single threaded and gets stuck on the empty connection. Send it a real OCSP request instead (see the healthcheck in `docker-compose.yml`)._
 
 ## Troubleshooting
 
