@@ -17,11 +17,20 @@ Configuration (environment variables):
   OCSP_ALLOWED_HOSTS  comma separated hosts we may contact for the OCSP and
                       CA-issuer URLs found in a certificate's AIA extension
                       (default: OCSP_HOST,CAC_HOST). `*` allows any host.
+  OCSP_CACHE_TTL      seconds to cache `good` and `revoked` results (default: 60,
+                      0 disables caching). Never longer than the OCSP response's
+                      nextUpdate or the certificate's own expiry. Also sent to nginx
+                      as X-Accel-Expires so nginx can cache the auth subrequest too.
   OCSP_VERBOSE        1 to log extra detail for every request
+
+Revocations take up to OCSP_CACHE_TTL seconds to be noticed.
 """
+import contextlib
 import datetime
 import os
 import sys
+import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
@@ -49,6 +58,18 @@ ALLOWED_HOSTS = {
     for h in (os.environ.get("OCSP_ALLOWED_HOSTS") or f"{OCSP_HOST},{CAC_HOST}").split(",")
     if h.strip()
 }
+
+
+def _int_env(name, default):
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+CACHE_TTL = _int_env("OCSP_CACHE_TTL", 60)
+CACHE_MAX_ENTRIES = 1000
+ISSUER_CACHE_TTL = 3600
 VERBOSE = os.environ.get("OCSP_VERBOSE", "").lower() in ("1", "true", "yes")
 
 TRUSTED_CAS = []
@@ -181,6 +202,61 @@ def find_issuer(cert, pool):
     return None
 
 
+# --- caching ----------------------------------------------------------------
+
+class TTLCache:
+    """Small thread safe cache with per-entry expiry (epoch seconds) and a size bound."""
+
+    def __init__(self, max_entries):
+        self.max_entries = max_entries
+        self._data = {}
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return None
+            value, expires = entry
+            if expires <= time.time():
+                del self._data[key]
+                return None
+            return value, expires
+
+    def put(self, key, value, expires):
+        with self._lock:
+            if len(self._data) >= self.max_entries:
+                now = time.time()
+                for k in [k for k, (_, exp) in self._data.items() if exp <= now]:
+                    del self._data[k]
+                while len(self._data) >= self.max_entries:  # still full: drop the oldest
+                    del self._data[next(iter(self._data))]
+            self._data[key] = (value, expires)
+
+
+RESULT_CACHE = TTLCache(CACHE_MAX_ENTRIES)
+ISSUER_CACHE = TTLCache(32)
+
+_inflight_guard = threading.Lock()
+_inflight = {}
+
+
+@contextlib.contextmanager
+def key_lock(key):
+    """Serialize work per key, so concurrent requests for the same cert share one lookup."""
+    with _inflight_guard:
+        entry = _inflight.setdefault(key, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _inflight_guard:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del _inflight[key]
+
+
 # --- network helpers --------------------------------------------------------
 
 def url_allowed(url):
@@ -200,9 +276,14 @@ def read_limited(response):
 
 
 def fetch_issuers(url):
+    cached = ISSUER_CACHE.get(url)
+    if cached is not None:
+        return cached[0]
     response = requests.get(url, timeout=3, allow_redirects=False, stream=True)
     response.raise_for_status()
-    return load_certificates(read_limited(response))
+    certs = load_certificates(read_limited(response))
+    ISSUER_CACHE.put(url, certs, time.time() + ISSUER_CACHE_TTL)
+    return certs
 
 
 # --- OCSP -------------------------------------------------------------------
@@ -293,46 +374,86 @@ def check_ocsp(cert, issuer, url):
         raise Denied("error", "OCSP response is stale")
 
     if resp.certificate_status == ocsp.OCSPCertStatus.GOOD:
-        return
+        return "good", "", next_update
     if resp.certificate_status == ocsp.OCSPCertStatus.REVOKED:
         reason = resp.revocation_reason.name if resp.revocation_reason else "unspecified"
-        raise Denied("revoked", reason)
-    raise Denied("unknown", "responder does not know this certificate")
+        return "revoked", reason, next_update
+    return "unknown", "responder does not know this certificate", None
 
 
 # --- request handling -------------------------------------------------------
 
+class Result:
+    """What we tell nginx. `expires` (epoch seconds) is set when the answer may be cached."""
+
+    def __init__(self, status, reason="", upn=None, cache="none", expires=None):
+        self.status = status
+        self.reason = reason
+        self.upn = upn
+        self.cache = cache
+        self.expires = expires
+
+    @property
+    def code(self):
+        return 200 if self.status == "good" else 403
+
+
 def validate(header):
-    """Validate the certificate in `header`. Returns the UPN, or raises Denied."""
+    """Validate the certificate in `header`; always returns a Result (or raises on a bug)."""
     if not header:
-        raise Denied("no-cert", "missing X-Client-Cert header")
+        return Result("no-cert", "missing X-Client-Cert header")
 
     try:
         cert = parse_client_cert(header)
     except ValueError as e:
-        raise Denied("invalid-cert", f"could not parse certificate: {e}")
+        return Result("invalid-cert", f"could not parse certificate: {e}")
 
     try:
         upn = get_upn(cert)
     except (ValueError, UnicodeDecodeError) as e:
-        raise Denied("no-upn", f"could not parse UPN: {e}")
+        return Result("no-upn", f"could not parse UPN: {e}")
     if upn is None:
-        raise Denied("no-upn", "certificate has no UPN in its SAN")
+        return Result("no-upn", "certificate has no UPN in its SAN")
 
-    try:
-        return validate_known_upn(cert, upn)
-    except Denied as d:
-        d.upn = upn
-        raise
-
-
-def validate_known_upn(cert, upn):
+    # Cheap local checks are never cached
     now = now_utc()
     if now > utc(cert, "not_valid_after"):
-        raise Denied("expired", f"expired on {utc(cert, 'not_valid_after').isoformat()}")
+        return Result("expired", f"expired on {utc(cert, 'not_valid_after').isoformat()}", upn)
     if now < utc(cert, "not_valid_before"):
-        raise Denied("not-yet-valid", f"valid from {utc(cert, 'not_valid_before').isoformat()}")
+        return Result("not-yet-valid", f"valid from {utc(cert, 'not_valid_before').isoformat()}", upn)
 
+    key = cert.fingerprint(hashes.SHA256())
+    cached = RESULT_CACHE.get(key)
+    if cached is not None:
+        (status, reason), expires = cached
+        return Result(status, reason, upn, "hit", expires)
+
+    # Concurrent requests for the same cert wait here and then hit the cache
+    with key_lock(key):
+        cached = RESULT_CACHE.get(key)
+        if cached is not None:
+            (status, reason), expires = cached
+            return Result(status, reason, upn, "hit", expires)
+
+        try:
+            status, reason, next_update = lookup(cert)
+        except Denied as d:
+            return Result(d.status, d.reason, upn)  # errors are never cached
+
+        expires = None
+        if CACHE_TTL and status in ("good", "revoked"):
+            limit = time.time() + CACHE_TTL
+            for bound in (next_update, utc(cert, "not_valid_after")):
+                if bound is not None:
+                    limit = min(limit, bound.timestamp())
+            if limit > time.time() + 1:
+                expires = limit
+                RESULT_CACHE.put(key, (status, reason), expires)
+        return Result(status, reason, upn, "miss" if CACHE_TTL else "none", expires)
+
+
+def lookup(cert):
+    """Resolve the issuer and ask the responder. Returns (status, reason, next_update)."""
     ocsp_urls, issuer_urls = parse_aia(cert)
     vlog(f"AIA ocsp={ocsp_urls} ca_issuers={issuer_urls}")
 
@@ -359,8 +480,7 @@ def validate_known_upn(cert, upn):
         raise Denied("unknown-issuer", "certificate was not issued by a trusted CA")
 
     vlog(f"ocsp check using responder {ocsp_url} and issuer {issuer.subject.rfc4514_string()}")
-    check_ocsp(cert, issuer, ocsp_url)
-    return upn
+    return check_ocsp(cert, issuer, ocsp_url)
 
 
 def header_safe(value):
@@ -371,27 +491,27 @@ class OCSPValidationHandler(BaseHTTPRequestHandler):
     server_version = "ocsp-proxy"
 
     def do_GET(self):
-        header = self.headers.get("X-Client-Cert")
-        upn = None
         try:
-            upn = validate(header)
-            code, status, reason = 200, "good", ""
-        except Denied as d:
-            code, status, reason, upn = 403, d.status, d.reason, d.upn
+            result = validate(self.headers.get("X-Client-Cert"))
+            code = result.code
         except Exception as e:
             traceback.print_exc()
-            code, status, reason = 500, "error", f"internal error: {e}"
+            result, code = Result("error", f"internal error: {e}"), 500
 
-        print(f"ocsp-proxy: status={status} upn={upn} reason={reason!r}", flush=True)
+        print(f"ocsp-proxy: status={result.status} cache={result.cache} upn={result.upn} reason={result.reason!r}", flush=True)
 
         self.send_response(code)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", "0")
-        self.send_header("X-OCSP-Status", status)
-        if reason:
-            self.send_header("X-OCSP-Reason", header_safe(reason))
-        if upn:
-            self.send_header("X-UPN", header_safe(upn))
+        self.send_header("X-OCSP-Status", result.status)
+        self.send_header("X-OCSP-Cache", result.cache)
+        if result.reason:
+            self.send_header("X-OCSP-Reason", header_safe(result.reason))
+        if result.upn:
+            self.send_header("X-UPN", header_safe(result.upn))
+        # Lets nginx cache this answer, for exactly as long as we would
+        remaining = int(result.expires - time.time()) if result.expires else 0
+        self.send_header("X-Accel-Expires", str(max(remaining, 0)))
         self.end_headers()
 
 
@@ -401,6 +521,7 @@ def run(port=9000):
         TRUSTED_CAS = load_certificates(f.read())
     print(f"Loaded {len(TRUSTED_CAS)} trusted CA(s) from {TRUSTED_CA_PATH}", flush=True)
     print(f"Default responder: {DEFAULT_OCSP_URL}; allowed AIA hosts: {sorted(ALLOWED_HOSTS)}", flush=True)
+    print(f"Result cache TTL: {CACHE_TTL}s" if CACHE_TTL else "Result cache disabled", flush=True)
     httpd = ThreadingHTTPServer(("", port), OCSPValidationHandler)
     print(f"Starting OCSP validation proxy on port {port}...", flush=True)
     httpd.serve_forever()

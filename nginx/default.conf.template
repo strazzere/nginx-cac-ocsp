@@ -16,6 +16,11 @@ server {
     }
 }
 
+# Cache of OCSP verdicts. How long an entry lives is decided by the proxy (X-Accel-Expires),
+# which only sends a lifetime for definitive good/revoked answers: errors and
+# unreachable responders are never cached. OCSP_CACHE_TTL=0 on the proxy disables this.
+proxy_cache_path /var/cache/nginx/ocsp levels=1:2 keys_zone=ocsp_auth:1m max_size=10m inactive=10m;
+
 # Extract the CN from the (RFC 2253 formatted) subject DN, honouring escaped commas.
 # Empty when there is no CN, in which case requests are rejected.
 map $ssl_client_s_dn $ssl_client_cn {
@@ -55,6 +60,8 @@ server {
     # Values filled in by the ocsp-validate auth_request (see below)
     set $ocsp_status "";
     set $ocsp_reason "";
+    set $ocsp_cache "";
+    set $auth_cache "";
 
     # Client certificate errors, rejected by nginx before any location is reached;
     # https://nginx.org/en/docs/http/ngx_http_ssl_module.html#errors
@@ -81,6 +88,11 @@ server {
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Client-Cert $ssl_client_escaped_cert;
+
+        # One lookup per client cert, shared by all concurrent requests (e.g. page assets)
+        proxy_cache ocsp_auth;
+        proxy_cache_key $ssl_client_fingerprint;
+        proxy_cache_lock on;
     }
 
     # Shows what nginx knows about the client; 200 only if the cert passes OCSP
@@ -91,6 +103,8 @@ server {
         auth_request_set $ssl_client_upn $upstream_http_x_upn;
         auth_request_set $ocsp_status $upstream_http_x_ocsp_status;
         auth_request_set $ocsp_reason $upstream_http_x_ocsp_reason;
+        auth_request_set $ocsp_cache $upstream_http_x_ocsp_cache;
+        auth_request_set $auth_cache $upstream_cache_status;
 
         include /etc/nginx/snippets/cac_headers.conf;
         add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure";
@@ -129,6 +143,8 @@ server {
         auth_request_set $ssl_client_upn $upstream_http_x_upn;
         auth_request_set $ocsp_status $upstream_http_x_ocsp_status;
         auth_request_set $ocsp_reason $upstream_http_x_ocsp_reason;
+        auth_request_set $ocsp_cache $upstream_http_x_ocsp_cache;
+        auth_request_set $auth_cache $upstream_cache_status;
 
         include /etc/nginx/snippets/cac_headers.conf;
         add_header Set-Cookie "session=valid; Max-Age=3600; Path=/; HttpOnly; Secure";

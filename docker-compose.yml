@@ -9,6 +9,8 @@ services:
       CAC_HOST: ${CAC_HOST:-cac.penryn.local}
       # Hosts we may contact for AIA urls found in client certs (default: OCSP_HOST,CAC_HOST, `*` for any)
       OCSP_ALLOWED_HOSTS: ${OCSP_ALLOWED_HOSTS:-}
+      # Seconds to cache good/revoked verdicts (0 disables). Revocations take this long to be noticed.
+      OCSP_CACHE_TTL: ${OCSP_CACHE_TTL:-60}
       OCSP_VERBOSE: ${OCSP_VERBOSE:-}
     healthcheck:
       # Send the responder a real OCSP request (the status of the answer does not matter) and check
@@ -38,6 +40,9 @@ services:
       cac:
         aliases:
           - ${CAC_HOST:-cac.penryn.local}
+    # nginx's verdict cache; in memory so it is dropped on restart
+    tmpfs:
+      - /var/cache/nginx
     ports:
       - "8443:443"
 

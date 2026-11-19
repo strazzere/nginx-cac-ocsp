@@ -61,6 +61,27 @@ check "cert without a UPN is denied"             403 no-upn  ""                 
 check "expired cert is denied"                   403 ""      ""                                    "$BASE/" $(cert test_expired)
 check "no cert gets 401"                         401 ""      ""                                    "$BASE/"
 
+# Verdicts are cached for OCSP_CACHE_TTL seconds (default 60); 0 turns caching off.
+# The checks above already primed the cache, so this request must be a hit (or never one).
+cache_status() {
+    curl -sk -D - -o /dev/null "$@" | tr -d '\r' | sed -n 's/^x-auth-cache: //Ip'
+}
+# shellcheck disable=SC2046
+got=$(cache_status $(cert yubico_client) "$BASE/cac-test")
+# shellcheck disable=SC2046
+got_revoked=$(cache_status $(cert test_revoked) "$BASE/cac-test")
+if [ "${OCSP_CACHE_TTL:-60}" = 0 ]; then
+    want=""; [ "$got" != HIT ] && [ "$got_revoked" != HIT ] && ok=1 || ok=0
+else
+    want=HIT; [ "$got" = HIT ] && [ "$got_revoked" = HIT ] && ok=1 || ok=0
+fi
+if [ $ok = 1 ]; then
+    echo "PASS  verdict caching (OCSP_CACHE_TTL=${OCSP_CACHE_TTL:-60}): good=$got revoked=$got_revoked"
+else
+    echo "FAIL  verdict caching (OCSP_CACHE_TTL=${OCSP_CACHE_TTL:-60}): good=$got revoked=$got_revoked"
+    FAILED=1
+fi
+
 # The proxy must not leave temp files behind, and must survive garbage
 docker compose exec -T ocsp python3 -c '
 import urllib.request, urllib.error

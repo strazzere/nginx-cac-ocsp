@@ -18,9 +18,11 @@ $(DIRS):
 run:
 	docker compose up --build
 
-# Spin up the stack (plus a header-echoing downstream), exercise it with curl, and tear it down
+# Spin up the stack (plus a header-echoing downstream), exercise it with curl, and tear it down.
+# Run once with verdict caching on (the default) and once with it off.
 test: all
 	./test/run.sh
+	OCSP_CACHE_TTL=0 ./test/run.sh
 
 clean:
 	@for dir in $(CLEAN_DIRS); do \

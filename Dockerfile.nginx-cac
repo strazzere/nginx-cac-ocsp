@@ -1,6 +1,6 @@
 FROM alpine:latest
 
-RUN apk add --no-cache nginx gettext && mkdir -p /run/nginx /www/data /www/cert /etc/nginx/snippets
+RUN apk add --no-cache nginx gettext && mkdir -p /run/nginx /www/data /www/cert /etc/nginx/snippets /var/cache/nginx/ocsp
 
 COPY nginx/certificate.pem nginx/key.pem ca/certs/ca.crt /etc/nginx/
 

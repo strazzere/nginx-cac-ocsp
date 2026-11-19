@@ -47,6 +47,7 @@ The OCSP proxy also understands (set them under `ocsp.environment` in `docker-co
 | Variable | Default | Purpose |
 |---|---|---|
 | `OCSP_ALLOWED_HOSTS` | `OCSP_HOST,CAC_HOST` | Hosts the proxy may contact for the OCSP / CA-issuer URLs found in a client certificate. Use `*` to allow any host, e.g. when testing against a real CA's responder. |
+| `OCSP_CACHE_TTL` | `60` | Seconds to cache `good` and `revoked` verdicts, `0` disables caching (see below) |
 | `OCSP_VERBOSE` | _(off)_ | Set to `1` for detailed per-request logging |
 
 ## What the services tell you
@@ -60,6 +61,16 @@ Requests that pass are proxied to `DOWNSTREAM_SERVICE` with `X-Client-UPN`, `X-C
 
 Certificates the proxy checks: the issuer must chain to `ca/certs/ca.crt`. Intermediates may be fetched from the certificate's `caIssuers` URL (PEM, DER or PKCS#7), but only from `OCSP_ALLOWED_HOSTS` and they are never trusted unless they chain to the trusted CA.
 
+## Caching
+
+Checking OCSP on every request would be slow (a page with many assets would do dozens of lookups at once), so verdicts are cached, much as an F5 or any production setup would:
+
+* the proxy caches `good` and `revoked` results per certificate for `OCSP_CACHE_TTL` seconds, or less if the OCSP response's `nextUpdate` or the certificate's own expiry comes first. Concurrent requests for the same certificate share a single lookup, and downloaded issuer certs are cached for an hour.
+* the proxy tells nginx how long its answer is valid (`X-Accel-Expires`), so nginx caches the `auth_request` subrequest too and doesn't even call the proxy for repeat requests. nginx's cache is in memory and cleared when the container restarts.
+* errors (an unreachable responder, a bad response) and `unknown` are never cached.
+
+The cost is that a revocation takes up to `OCSP_CACHE_TTL` seconds to be noticed, so when testing a revocation either wait, restart the services (`docker compose restart ocsp cac`) or set `OCSP_CACHE_TTL=0`. Responses show where a verdict came from in `X-OCSP-Cache` (the proxy's cache, which reflects the original lookup) and `X-Auth-Cache` (`HIT` when nginx answered from its cache).
+
 ## Testing
 
 `make` creates the CA, the responder/server certs and a handful of client certs in `client/`:
@@ -69,7 +80,7 @@ Certificates the proxy checks: the issuer must chain to `ca/certs/ca.crt`. Inter
 * `test_expired` - signed, but already expired
 * `test_no_upn` - valid, but without a UPN in its SAN
 
-`make test` starts the stack alongside a tiny downstream that echoes headers, runs `curl` against every case above, and tears everything down again. It needs docker and the certs from `make`.
+`make test` starts the stack alongside a tiny downstream that echoes headers, runs `curl` against every case above (once with caching on and once with `OCSP_CACHE_TTL=0`), and tears everything down again. It needs docker and the certs from `make`.
 
 _Note: don't open and close a bare TCP connection to the OCSP responder's port (2560), e.g. with a port scanner or a naive healthcheck. The `openssl ocsp` server is single threaded and gets stuck on the empty connection. Send it a real OCSP request instead (see the healthcheck in `docker-compose.yml`)._
 
