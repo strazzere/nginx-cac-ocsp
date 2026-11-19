@@ -74,7 +74,7 @@ What is and isn't trusted:
 * **The UPN is passed through untouched or not at all.** Certificates whose UPN is empty, over 256 characters, or contains anything but printable ASCII are denied (`invalid-upn`) instead of being stripped or truncated, which could make two different users look identical downstream.
 * **OCSP responses** are signature checked (against the CA or a responder it delegated to with the OCSP-signing usage), matched to the request, checked for freshness and a nonce, so a captured "good" response can't be replayed after a revocation.
 * **AIA URLs** in a certificate are only contacted if their host is in `OCSP_ALLOWED_HOSTS`, never follow redirects, and a downloaded issuer is only used if it chains to the trusted CA.
-* nginx does **not** run SSI on downstream responses, drops the TLS session ticket keys' forward-secrecy problem (`ssl_session_tickets off`), and the pages it serves itself carry a strict CSP.
+* nginx does **not** run SSI on downstream responses, has TLS session tickets turned off (their long-lived keys undermine forward secrecy), and the pages it serves itself carry a strict CSP.
 * The containers run with a read-only filesystem, no capabilities beyond what nginx needs to start, and `no-new-privileges`. The OCSP container runs as an unprivileged user; nginx's workers do too.
 
 What you should still do:
