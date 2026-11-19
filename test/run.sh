@@ -56,6 +56,8 @@ check "revoked cert is denied on /cac-test"      403 revoked ""                 
 check "revoked cert is denied on /"              403 revoked ""                                    "$BASE/" $(cert test_revoked)
 # shellcheck disable=SC2046
 check "cert without a UPN is denied"             403 no-upn  ""                                    "$BASE/" $(cert test_no_upn)
+# shellcheck disable=SC2046
+check "non-ASCII UPN is denied, not mangled"     403 invalid-upn ""                                "$BASE/" $(cert test_bad_upn)
 # nginx itself rejects expired certs, before the OCSP proxy is involved
 # shellcheck disable=SC2046
 check "expired cert is denied"                   403 ""      ""                                    "$BASE/" $(cert test_expired)
@@ -82,7 +84,25 @@ else
     FAILED=1
 fi
 
-# The proxy must not leave temp files behind, and must survive garbage
+# nginx must not execute SSI directives that appear in the downstream app's responses
+# shellcheck disable=SC2046
+if curl -sk $(cert yubico_client) "$BASE/" | grep -q "BEGIN CERTIFICATE"; then
+    echo "FAIL  SSI directives in downstream responses are executed"; FAILED=1
+else
+    echo "PASS  SSI directives in downstream responses are not executed"
+fi
+
+# The port 80 redirect goes to our own host name
+CAC_HOST=${CAC_HOST:-cac.penryn.local}
+loc=$(docker compose exec -T echo python3 -c "
+import http.client
+c = http.client.HTTPConnection('$CAC_HOST', 80)
+c.request('GET', '/x?y=1', headers={'Host': 'evil.example'})
+print(c.getresponse().getheader('Location'))")
+if [ "$loc" = "https://$CAC_HOST/x?y=1" ]; then echo "PASS  http redirects to the canonical https host"
+else echo "FAIL  http redirect went to '$loc'"; FAILED=1; fi
+
+# The proxy must survive garbage, and tell clients only a generic reason
 docker compose exec -T ocsp python3 -c '
 import urllib.request, urllib.error
 req = urllib.request.Request("http://localhost:9000/", headers={"X-Client-Cert": "garbage"})
@@ -90,9 +110,10 @@ try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
     assert e.code == 403 and e.headers["X-OCSP-Status"] == "invalid-cert", (e.code, e.headers)
+    assert e.headers["X-OCSP-Reason"] == "certificate could not be parsed", e.headers["X-OCSP-Reason"]
 else:
     raise SystemExit("expected a 403")
-' && echo "PASS  garbage certificate header is a 403" || { echo "FAIL  garbage certificate header"; FAILED=1; }
+' && echo "PASS  garbage certificate header is a 403 with a generic reason" || { echo "FAIL  garbage certificate header"; FAILED=1; }
 
 if [ $FAILED = 0 ]; then echo "all tests passed"; else echo "some tests FAILED"; fi
 exit $FAILED

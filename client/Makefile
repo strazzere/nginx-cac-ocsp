@@ -34,7 +34,8 @@ yubico_client.pem: yubico_client.key
 #   test_expired.pem - signed by the CA but already expired
 #   test_revoked.pem - signed by the CA, then revoked
 #   test_no_upn.pem  - signed by the CA, has no UPN in its SAN
-test_certs: test_expired.pem test_revoked.pem test_no_upn.pem
+#   test_bad_upn.pem - signed by the CA, UPN has a non-ASCII character
+test_certs: test_expired.pem test_revoked.pem test_no_upn.pem test_bad_upn.pem
 
 test_%.key:
 	openssl req -new -newkey rsa:2048 -nodes -keyout $@ -out test_$*.csr -sha256 -batch \
@@ -50,6 +51,9 @@ test_revoked.pem: test_revoked.key
 
 test_no_upn.pem: test_no_upn.key
 	openssl ca -in test_no_upn.csr -out $@ -days 1024 -extensions noupn_ext $(CA_ARGS)
+
+test_bad_upn.pem: test_bad_upn.key
+	openssl ca -in test_bad_upn.csr -out $@ -days 1024 -extensions badupn_ext $(CA_ARGS)
 
 # Revoke the main client cert in the CA database (a no-op if it was never issued)
 revoke_csr:
