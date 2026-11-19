@@ -121,10 +121,16 @@ class Denied(Exception):
 
 # --- certificate helpers ----------------------------------------------------
 
-def utc(cert, attr):
-    """Timezone aware validity date, across cryptography versions."""
-    value = getattr(cert, f"{attr}_utc", None)
-    return value if value is not None else getattr(cert, attr).replace(tzinfo=datetime.timezone.utc)
+def utc_opt(obj, attr):
+    """Timezone aware datetime (or None) for a cert/OCSP response date, across cryptography versions."""
+    if hasattr(obj, f"{attr}_utc"):
+        return getattr(obj, f"{attr}_utc")
+    value = getattr(obj, attr)
+    return None if value is None else value.replace(tzinfo=datetime.timezone.utc)
+
+
+def utc(obj, attr):
+    return utc_opt(obj, attr)
 
 
 def now_utc():
@@ -411,7 +417,7 @@ def check_ocsp(cert, issuer, url):
         raise Denied("error", "OCSP response did not echo the request nonce")
 
     this_update = utc(resp, "this_update")
-    next_update = utc(resp, "next_update") if resp.next_update is not None else None
+    next_update = utc_opt(resp, "next_update")
     if this_update > now + CLOCK_SKEW:
         raise Denied("error", "OCSP response is from the future")
     if next_update is not None and next_update < now - CLOCK_SKEW:

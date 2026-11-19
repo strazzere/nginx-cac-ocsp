@@ -28,7 +28,7 @@ This project consists of a few components:
 
 To build the project, simply run `make`. This will generate all the certificates required for each service. You will need to manually import the generated client keys onto a `YubiKey` or another key-holding device. Alternatively, you can use the certificates directly for `curl` requests.
 
-After generating the certificates and configuring your local machine for using CAC devices in Chrome or Firefox, you can run `make run` to start the services. The services will be reachable at `https://0.0.0.0:8443`, as defined in the `docker-compose.yml`. Generated certificates are valid for ten years (the client certs for just under three).
+After generating the certificates and configuring your local machine for using CAC devices in Chrome or Firefox, you can run `make run` to start the services. The services are reachable at `https://127.0.0.1:8443` (set `BIND_ADDR=0.0.0.0` to expose them to your network), as defined in the `docker-compose.yml`. Generated certificates are valid for ten years (the client certs for just under three).
 
 ## Configuration
 
@@ -48,6 +48,10 @@ The OCSP proxy also understands (set them under `ocsp.environment` in `docker-co
 |---|---|---|
 | `OCSP_ALLOWED_HOSTS` | `OCSP_HOST,CAC_HOST` | Hosts the proxy may contact for the OCSP / CA-issuer URLs found in a client certificate. Use `*` to allow any host, e.g. when testing against a real CA's responder. |
 | `OCSP_CACHE_TTL` | `60` | Seconds to cache `good` and `revoked` verdicts, `0` disables caching (see below) |
+| `OCSP_MAX_RESPONSE_AGE` | `3600` | Seconds an OCSP response with neither `nextUpdate` nor a nonce stays acceptable |
+| `OCSP_REQUIRE_NONCE` | _(off)_ | Reject responders that don't echo the request nonce (a nonce is always sent, and checked when echoed) |
+| `OCSP_EXPOSE_DETAILS` | _(off)_ | Put detailed failure reasons in `X-OCSP-Reason` (handy for debugging, but leaks internals) |
+| `BIND_ADDR` | `127.0.0.1` | Address the https port (8443) is published on; use `0.0.0.0` to reach it from other machines |
 | `OCSP_VERBOSE` | _(off)_ | Set to `1` for detailed per-request logging |
 
 ## What the services tell you
@@ -55,11 +59,30 @@ The OCSP proxy also understands (set them under `ocsp.environment` in `docker-co
 For every request nginx asks the proxy whether the client certificate is acceptable. The result is exposed in:
 
 * the HTTP status: `200` accepted, `401` no certificate sent, `403` anything else (revoked, expired, untrusted, no UPN, ...)
-* an `X-OCSP-Status` response header: `good`, `revoked`, `unknown`, `expired`, `not-yet-valid`, `no-upn`, `invalid-cert`, `unknown-issuer`, `unreachable` or `error`, with details in `X-OCSP-Reason`
+* an `X-OCSP-Status` response header: `good`, `revoked`, `unknown`, `expired`, `not-yet-valid`, `no-upn`, `invalid-cert`, `invalid-upn`, `unknown-issuer`, `unreachable` or `error`, with a short reason in `X-OCSP-Reason` (the details, which can name internal hosts, only go to the logs unless `OCSP_EXPOSE_DETAILS=1`)
 
 Requests that pass are proxied to `DOWNSTREAM_SERVICE` with `X-Client-UPN`, `X-Client-CN`, `X-Client-Verified` and `X-Subject-DN` headers. These always overwrite anything the client sent itself, and the downstream app should only trust them if it is reachable exclusively through this nginx. `/cac-test` shows what nginx knows about your certificate without needing a downstream.
 
 Certificates the proxy checks: the issuer must chain to `ca/certs/ca.crt`. Intermediates may be fetched from the certificate's `caIssuers` URL (PEM, DER or PKCS#7), but only from `OCSP_ALLOWED_HOSTS` and they are never trusted unless they chain to the trusted CA.
+
+## Security notes
+
+What is and isn't trusted:
+
+* **nginx** terminates TLS and verifies the client certificate chain against `ca/certs/ca.crt`. The **OCSP proxy** trusts nginx to have done that, and only decides revocation. It's on the internal docker network only (port 9000 is not published); don't expose it, since anyone who can reach it can submit any certificate for a verdict.
+* **Failing closed:** a missing/invalid certificate, an unreachable responder, a bad or replayed OCSP response, or any internal error all result in a denial.
+* **The UPN is passed through untouched or not at all.** Certificates whose UPN is empty, over 256 characters, or contains anything but printable ASCII are denied (`invalid-upn`) instead of being stripped or truncated, which could make two different users look identical downstream.
+* **OCSP responses** are signature checked (against the CA or a responder it delegated to with the OCSP-signing usage), matched to the request, checked for freshness and a nonce, so a captured "good" response can't be replayed after a revocation.
+* **AIA URLs** in a certificate are only contacted if their host is in `OCSP_ALLOWED_HOSTS`, never follow redirects, and a downloaded issuer is only used if it chains to the trusted CA.
+* nginx does **not** run SSI on downstream responses, drops the TLS session ticket keys' forward-secrecy problem (`ssl_session_tickets off`), and the pages it serves itself carry a strict CSP.
+* The containers run with a read-only filesystem, no capabilities beyond what nginx needs to start, and `no-new-privileges`. The OCSP container runs as an unprivileged user; nginx's workers do too.
+
+What you should still do:
+
+* **Downstream app:** only trust `X-Client-UPN` and friends if it is reachable *only* through this nginx. The connection from nginx to `DOWNSTREAM_SERVICE` is plain http; use a TLS (ideally mutually authenticated) upstream if it leaves a trusted network.
+* **The `session=valid` cookie is a mock.** It is the same for everyone and unsigned, so it proves nothing: don't let an app treat it as a session.
+* **Keys are baked into the images** (`nginx/key.pem`, `ocsp/ocsp_key.pem`), and `ca/private/ca.key` is unencrypted on disk. That's fine for local testing; never push the images or reuse these certificates anywhere real.
+* Client certs made here have no `clientAuth`/smartcard-logon extended key usage, unlike real CAC certs, so nothing checks for it.
 
 ## Caching
 
